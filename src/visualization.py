@@ -215,7 +215,7 @@ class Visualizer:
                 legend=False # Do not add a second legend for violations
             )
 
-        ax.set_title("全局话语分布 (UMAP) - 黄边三角形表示边界混淆点")
+        ax.set_title("全局语料分布 (UMAP) - 黄边三角形表示边界混淆点")
         ax.legend(title='意图', bbox_to_anchor=(1.05, 1), loc='upper left')
         
         # --- Add text box for top violations ---
@@ -224,7 +224,7 @@ class Visualizer:
             # Violations are pre-sorted by p-value descending from the processor
             top_violations = boundary_violations[:top_n]
             
-            report_lines = [f"边界混淆话语 Top {len(top_violations)} (按p-value排序):"]
+            report_lines = [f"边界混淆语料 Top {len(top_violations)} (按p-value排序):"]
             for i, v in enumerate(top_violations):
                 # Truncate long utterance text for display
                 text = v.text if len(v.text) < 50 else v.text[:47] + "..."
@@ -322,7 +322,7 @@ class Visualizer:
                     color='darkred'
                 )
 
-            ax.set_title(f"意图内部话语分布: '{intent_name}' (UMAP)")
+            ax.set_title(f"意图内部语料分布: '{intent_name}' (UMAP)")
             ax.legend(title='类型')
             plt.tight_layout()
 

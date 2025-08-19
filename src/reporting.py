@@ -56,13 +56,13 @@ class ReportGenerator:
         ## 1. 数据集概览
         
         - **总意图数:** {self.dataset.count_intents()}
-        - **总话语数:** {self.dataset.count_utterances()}
-        - **话语数少于 {threshold} 的意图数量:** {len(low_utterance_intents)}
+        - **总语料数:** {self.dataset.count_utterances()}
+        - **语料数少于 {threshold} 的意图数量:** {len(low_utterance_intents)}
         
         """
         self.report_parts.append(textwrap.dedent(summary))
         if low_utterance_intents:
-            table = "| 意图 | 话语数量 |\n|---|---|\n"
+            table = "| 意图 | 语料数量 |\n|---|---|\n"
             for intent, count in sorted(low_utterance_intents.items(), key=lambda item: item[1]):
                 table += f"| `{intent}` | {count} |\n"
             self.report_parts.append(table)
@@ -72,7 +72,7 @@ class ReportGenerator:
         report = f"""
         ## 2. 意图内部异常点检测
         
-        本节列出了在语义上与其所属意图的中心相距甚远的话语。这些可能是标注错误或意图定义不清的信号。
+        本节列出了在语义上与其所属意图的中心相距甚远的语料。这些可能是标注错误或意图定义不清的信号。
         
         """
         self.report_parts.append(textwrap.dedent(report))
@@ -83,7 +83,7 @@ class ReportGenerator:
 
         for intent, records in outliers.items():
             intent_header = f"### 意图: `{intent}`\n\n"
-            table = "| 排名 | 异常分数 | 阈值 | 话语文本 |\n|---|---|---|---|\n"
+            table = "| 排名 | 异常分数 | 阈值 | 语料文本 |\n|---|---|---|---|\n"
             for record in records:
                 table += f"| {record['rank']} | {record['score']:.4f} | {record['threshold']:.4f} | `{record['text']}` |\n"
             self.report_parts.append(intent_header + table + "\n")
@@ -94,14 +94,14 @@ class ReportGenerator:
         report = f"""
         ## 3. 全局聚类审计 (HDBSCAN)
         
-        此审计无视原始意图标签，将所有话语按语义相似度进行分组，以识别潜在的意图重叠或定义不一致的问题。
+        此审计无视原始意图标签，将所有语料按语义相似度进行分组，以识别潜在的意图重叠或定义不一致的问题。
         
         - **发现的簇数:** {summary.get('num_clusters', 'N/A')}
-        - **噪声比例:** {summary.get('noise_ratio', 0):.2%} (未被分配到任何簇的话语)
+        - **噪声比例:** {summary.get('noise_ratio', 0):.2%} (未被分配到任何簇的语料)
         
         ### 簇纯度分析
         
-        下表展示了纯度较低的簇，这些簇中混合了多个意图。这可能表明意图定义过于相似，或部分话语被错误标注。
+        下表展示了纯度较低的簇，这些簇中混合了多个意图。这可能表明意图定义过于相似，或部分语料被错误标注。
         
         | 簇ID | 大小 | 主要意图 | 纯度 | 意图分布 |
         |---|---|---|---|---|
@@ -130,8 +130,8 @@ class ReportGenerator:
         report = f"""
         ## 4. 意图边界混淆分析
 
-        本节使用马氏距离来识别那些在统计上可能属于另一个意图分布的话语。
-        高 p-value ( > 0.05) 意味着一个话语可以被合理地视为另一个意图的成员，这表明意图边界存在模糊。
+        本节使用马氏距离来识别那些在统计上可能属于另一个意图分布的语料。
+        高 p-value ( > 0.05) 意味着一个语料可以被合理地视为另一个意图的成员，这表明意图边界存在模糊。
 
         """
         self.report_parts.append(textwrap.dedent(report))
@@ -150,7 +150,7 @@ class ReportGenerator:
 
         self.report_parts.append(textwrap.dedent(report))
 
-        table = "| 原始意图 | 话语文本 | 最可能混淆的意图 | P-value | 马氏距离 |\n|---|---|---|---|---|\n"
+        table = "| 原始意图 | 语料文本 | 最可能混淆的意图 | P-value | 马氏距离 |\n|---|---|---|---|---|\n"
         for record in sorted_violations:
             table += (
                 f"| `{record.original_intent}` "
@@ -166,13 +166,13 @@ class ReportGenerator:
         report = f"""
         ## 5. 低样本意图增广建议
         
-        以下是为样本量不足的意图生成的候选话语，建议由人工审核后加入数据集。
+        以下是为样本量不足的意图生成的候选语料，建议由人工审核后加入数据集。
         
         """
         self.report_parts.append(textwrap.dedent(report))
 
         if not generated_candidates:
-            self.report_parts.append("未生成任何候选话语。\n")
+            self.report_parts.append("未生成任何候选语料。\n")
             return
 
         for intent, utterances in generated_candidates.items():

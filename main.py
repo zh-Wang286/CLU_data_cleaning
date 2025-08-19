@@ -122,7 +122,7 @@ def run_all(input_file: str, output_dir: str, min_samples: int, sort_by: str):
     "--dry-run",
     is_flag=True,
     default=False,
-    help="仅在控制台打印生成的候选话语，不保存报告文件。",
+    help="仅在控制台打印生成的候选语料，不保存报告文件。",
 )
 def enrich(input_file: str, output_dir: str, threshold: int, dry_run: bool):
     """
@@ -143,11 +143,11 @@ def enrich(input_file: str, output_dir: str, threshold: int, dry_run: bool):
     generated_candidates = processor.enrich_low_utterance_intents(threshold=threshold)
     
     if not generated_candidates:
-        logger.info("未生成任何候选话语。")
+        logger.info("未生成任何候选语料。")
         return
 
     if dry_run:
-        click.echo("\n--- 生成的话语候选集 (试运行) ---")
+        click.echo("\n--- 生成的语料候选集 (试运行) ---")
         for intent, utterances in generated_candidates.items():
             click.echo(f"\n意图: {intent}")
             for utt in utterances:
