@@ -125,7 +125,7 @@ class ReportGenerator:
                 f"| {cluster['cluster_id']} | {cluster['size']} | `{cluster['majority_intent']}` | {cluster['purity']:.2%} | {dist_str} |\n"
             )
     
-    def add_boundary_violation_report(self, violations: List[BoundaryViolationRecord]):
+    def add_boundary_violation_report(self, violations: List[BoundaryViolationRecord], sort_by: str = "p_value"):
         """Adds the intent boundary violation analysis to the report."""
         report = f"""
         ## 4. 意图边界混淆分析
@@ -140,8 +140,18 @@ class ReportGenerator:
             self.report_parts.append("未检测到明显的意图边界混淆。\n")
             return
 
+        # Sort based on the user's choice
+        if sort_by == 'intent':
+            sorted_violations = sorted(violations, key=lambda v: v.original_intent)
+            report += " (按原始意图排序)\n"
+        else: # Default to p_value
+            sorted_violations = sorted(violations, key=lambda v: v.confused_with.p_value, reverse=True)
+            report += " (按 p-value 降序排序)\n"
+
+        self.report_parts.append(textwrap.dedent(report))
+
         table = "| 原始意图 | 话语文本 | 最可能混淆的意图 | P-value | 马氏距离 |\n|---|---|---|---|---|\n"
-        for record in violations:
+        for record in sorted_violations:
             table += (
                 f"| `{record.original_intent}` "
                 f"| `{record.text}` "
