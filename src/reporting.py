@@ -1,0 +1,159 @@
+# -*- coding: utf-8 -*-
+"""Generates a structured Markdown report from analysis results."""
+
+from datetime import datetime
+from pathlib import Path
+import textwrap
+from typing import Dict, List
+
+from loguru import logger
+
+from src.config import settings
+from src.dataset import CLUDataset
+
+
+class ReportGenerator:
+    """
+    Aggregates analysis results into a comprehensive Markdown report.
+    """
+
+    def __init__(self, dataset: CLUDataset, output_dir: Path = Path("outputs/reports")):
+        """
+        Initializes the report generator.
+
+        Args:
+            dataset: The CLUDataset that was analyzed.
+            output_dir: The directory to save the report.
+        """
+        self.dataset = dataset
+        self.output_dir = output_dir
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.report_parts: List[str] = []
+        logger.info(
+            f"ReportGenerator initialized. Reports will be saved to '{self.output_dir.resolve()}'"
+        )
+
+    def add_header(self):
+        """Adds the main title and summary section to the report."""
+        project_name = self.dataset.project.metadata.projectName
+        run_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        header = f"""
+        # CLU 数据质量审计报告
+        
+        - **项目:** `{project_name}`
+        - **运行ID:** `{settings.run_id}`
+        - **时间戳:** `{run_time}`
+        
+        ---
+        """
+        self.report_parts.append(textwrap.dedent(header))
+
+    def add_dataset_summary(self, low_utterance_intents: Dict[str, int], threshold: int):
+        """Adds the dataset summary statistics to the report."""
+        summary = f"""
+        ## 1. 数据集概览
+        
+        - **总意图数:** {self.dataset.count_intents()}
+        - **总话语数:** {self.dataset.count_utterances()}
+        - **话语数少于 {threshold} 的意图数量:** {len(low_utterance_intents)}
+        
+        """
+        self.report_parts.append(textwrap.dedent(summary))
+        if low_utterance_intents:
+            table = "| 意图 | 话语数量 |\n|---|---|\n"
+            for intent, count in sorted(low_utterance_intents.items(), key=lambda item: item[1]):
+                table += f"| `{intent}` | {count} |\n"
+            self.report_parts.append(table)
+
+    def add_outlier_report(self, outliers: Dict[str, List[Dict]]):
+        """Adds the intra-intent outlier detection results to the report."""
+        report = f"""
+        ## 2. 意图内部异常点检测
+        
+        本节列出了在语义上与其所属意图的中心相距甚远的话语。这些可能是标注错误或意图定义不清的信号。
+        
+        """
+        self.report_parts.append(textwrap.dedent(report))
+
+        if not outliers:
+            self.report_parts.append("未检测到明显的异常点。\n")
+            return
+
+        for intent, records in outliers.items():
+            intent_header = f"### 意图: `{intent}`\n\n"
+            table = "| 排名 | 异常分数 | 阈值 | 话语文本 |\n|---|---|---|---|\n"
+            for record in records:
+                table += f"| {record['rank']} | {record['score']:.4f} | {record['threshold']:.4f} | `{record['text']}` |\n"
+            self.report_parts.append(intent_header + table + "\n")
+
+    def add_cluster_audit_report(self, cluster_audit: Dict):
+        """Adds the global clustering audit results to the report."""
+        summary = cluster_audit.get('summary', {})
+        report = f"""
+        ## 3. 全局聚类审计 (HDBSCAN)
+        
+        此审计无视原始意图标签，将所有话语按语义相似度进行分组，以识别潜在的意图重叠或定义不一致的问题。
+        
+        - **发现的簇数:** {summary.get('num_clusters', 'N/A')}
+        - **噪声比例:** {summary.get('noise_ratio', 0):.2%} (未被分配到任何簇的话语)
+        
+        ### 簇纯度分析
+        
+        下表展示了纯度较低的簇，这些簇中混合了多个意图。这可能表明意图定义过于相似，或部分话语被错误标注。
+        
+        | 簇ID | 大小 | 主要意图 | 纯度 | 意图分布 |
+        |---|---|---|---|---|
+        """
+        self.report_parts.append(textwrap.dedent(report))
+
+        clusters = cluster_audit.get('clusters', [])
+        for cluster in clusters:
+            dist_str = ", ".join([f"`{intent}` ({count})" for intent, count in cluster['intent_distribution'].items()])
+            self.report_parts.append(
+                f"| {cluster['cluster_id']} | {cluster['size']} | `{cluster['majority_intent']}` | {cluster['purity']:.2%} | {dist_str} |\n"
+            )
+    
+    def add_enrichment_report(self, generated_candidates: Dict[str, List[str]]):
+        """Adds the data enrichment suggestions to the report."""
+        report = f"""
+        ## 4. 低样本意图增广建议
+        
+        以下是为样本量不足的意图生成的候选话语，建议由人工审核后加入数据集。
+        
+        """
+        self.report_parts.append(textwrap.dedent(report))
+
+        if not generated_candidates:
+            self.report_parts.append("未生成任何候选话语。\n")
+            return
+
+        for intent, utterances in generated_candidates.items():
+            intent_header = f"### 意图: `{intent}`\n\n"
+            utterance_list = ""
+            for utt in utterances:
+                utterance_list += f"- `{utt}`\n"
+            self.report_parts.append(intent_header + utterance_list + "\n")
+
+    def generate(self, filename: str = "clu_audit_report_zh.md") -> Path:
+        """
+        Combines all parts and saves the final report to a file.
+
+        Args:
+            filename: The name of the output Markdown file.
+
+        Returns:
+            The path to the generated report.
+        """
+        final_report = "\n".join(self.report_parts)
+        save_path = self.output_dir / filename
+
+        try:
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(final_report)
+            logger.success(f"Successfully generated report: {save_path}")
+        except IOError as e:
+            logger.error(f"Failed to write report to {save_path}: {e}")
+            raise
+
+        return save_path
