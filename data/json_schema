@@ -1,0 +1,129 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IT_01_1 Conversation Project Schema",
+  "type": "object",
+  "properties": {
+    "projectFileVersion": {
+      "type": "string",
+      "description": "项目文件版本，例如 2025-05-15-preview"
+    },
+    "stringIndexType": {
+      "type": "string",
+      "enum": ["Utf16CodeUnit", "Utf32CodePoint", "TextElement_v8"]
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "projectKind": { "type": "string", "enum": ["Conversation"] },
+        "settings": {
+          "type": "object",
+          "properties": {
+            "confidenceThreshold": { "type": "number" },
+            "normalizeCasing": { "type": "boolean" },
+            "augmentDiacritics": { "type": "boolean" }
+          },
+          "required": ["confidenceThreshold", "normalizeCasing", "augmentDiacritics"]
+        },
+        "projectName": { "type": "string" },
+        "multilingual": { "type": "boolean" },
+        "description": { "type": "string" },
+        "language": { "type": "string" }
+      },
+      "required": ["projectKind", "settings", "projectName", "language"]
+    },
+    "assets": {
+      "type": "object",
+      "properties": {
+        "projectKind": { "type": "string" },
+        "intents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "category": { "type": "string" },
+              "description": { "type": "string" }
+            },
+            "required": ["category"]
+          }
+        },
+        "entities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "category": { "type": "string" },
+              "compositionSetting": { "type": "string", "enum": ["combineComponents"] },
+              "list": {
+                "type": "object",
+                "properties": {
+                  "sublists": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "listKey": { "type": "string" },
+                        "synonyms": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "language": { "type": "string" },
+                              "values": { "type": "array", "items": { "type": "string" } }
+                            },
+                            "required": ["language", "values"]
+                          }
+                        }
+                      },
+                      "required": ["listKey", "synonyms"]
+                    }
+                  }
+                }
+              },
+              "regex": {
+                "type": "object",
+                "properties": {
+                  "expressions": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "regexKey": { "type": "string" },
+                        "language": { "type": "string" },
+                        "regexPattern": { "type": "string" }
+                      },
+                      "required": ["regexKey", "language", "regexPattern"]
+                    }
+                  }
+                }
+              },
+              "prebuilts": {
+                "type": "array",
+                "items": { "type": "object", "properties": { "category": { "type": "string" } }, "required": ["category"] }
+              }
+            },
+            "required": ["category"]
+          }
+        },
+        "utterances": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "text": { "type": "string" },
+              "language": { "type": "string" },
+              "intent": { "type": "string" },
+              "entities": {
+                "type": "array",
+                "items": { "type": "object" }
+              },
+              "dataset": { "type": "string" }
+            },
+            "required": ["text", "intent"]
+          }
+        }
+      },
+      "required": ["intents", "entities", "utterances"]
+    }
+  },
+  "required": ["projectFileVersion", "stringIndexType", "metadata", "assets"]
+}
