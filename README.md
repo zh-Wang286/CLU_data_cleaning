@@ -25,7 +25,7 @@
 
 1.  **克隆代码仓库:**
     ```bash
-    git clone <repository-url>
+    git clone https://github.com/zh-Wang286/CLU_data_cleaning.git
     cd CLU_data_cleaning
     ```
 
@@ -46,15 +46,18 @@
     ```
 
 3.  **安装依赖:**
+
     本项目同时提供了 `pyproject.toml` (用于现代工具链) 和 `requirements.txt` (用于传统环境) 两种依赖定义文件。推荐使用 `uv` 进行安装。
 
     **选项 A: 使用 uv (推荐)**
+
     此命令会读取 `pyproject.toml` 文件，创建一个快速、精确且可重复的虚拟环境。
     ```bash
     uv sync
     ```
 
     **选项 B: 使用 pip**
+
     如果更习惯使用 `pip`，也可以通过 `requirements.txt` 文件进行安装：
     ```bash
     pip install -r requirements.txt
