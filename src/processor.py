@@ -43,6 +43,7 @@ class CLUProcessor:
         self.output_dir = output_dir
         self.embeddings_dir = self.output_dir / "embeddings"
         self.embeddings_dir.mkdir(parents=True, exist_ok=True)
+        self._cached_reduced_embeddings: Dict[int, Dict] = {} # Cache for PCA results
         logger.info(
             f"CLUProcessor initialized. Outputs will be saved to '{self.output_dir.resolve()}'"
         )
@@ -211,6 +212,48 @@ class CLUProcessor:
         )
         return all_outliers
 
+    def _get_reduced_embeddings_with_pca(
+        self, 
+        embeddings_map: Dict[str, np.ndarray], 
+        min_samples_for_analysis: int
+    ) -> Dict:
+        """
+        Performs PCA and caches the result to avoid re-computation.
+        """
+        if min_samples_for_analysis in self._cached_reduced_embeddings:
+            logger.info(f"Using cached PCA results for min_samples={min_samples_for_analysis}.")
+            return self._cached_reduced_embeddings[min_samples_for_analysis]
+
+        all_embeddings = np.array(list(embeddings_map.values()))
+        
+        intents_for_analysis = [
+            intent for intent in self.dataset.get_intents()
+            if len(self.dataset.get_utterances(intent=intent.category)) >= min_samples_for_analysis
+        ]
+        
+        if len(intents_for_analysis) < 2:
+            logger.warning("Fewer than 2 intents meet min sample requirement for PCA. Returning empty results.")
+            return {"reduced_map": {}, "target_dim": 0}
+
+        n_min = min(
+            len(self.dataset.get_utterances(intent=intent.category)) for intent in intents_for_analysis
+        )
+        
+        target_dim = min(n_min - 1, all_embeddings.shape[1])
+        logger.info(f"Applying PCA to reduce embedding dimension to {target_dim} (based on min samples {n_min}).")
+
+        pca = PCA(n_components=target_dim, random_state=42)
+        reduced_embeddings_matrix = pca.fit_transform(all_embeddings)
+
+        utterance_texts = list(embeddings_map.keys())
+        reduced_embeddings_map = {
+            text: reduced_vec for text, reduced_vec in zip(utterance_texts, reduced_embeddings_matrix)
+        }
+        
+        result = {"reduced_map": reduced_embeddings_map, "target_dim": target_dim, "intents_for_analysis": intents_for_analysis}
+        self._cached_reduced_embeddings[min_samples_for_analysis] = result
+        return result
+
     def detect_boundary_violations(
         self,
         embeddings_map: Dict[str, np.ndarray],
@@ -237,33 +280,14 @@ class CLUProcessor:
         )
 
         # --- PCA-based Dimensionality Reduction ---
-        all_embeddings = np.array(list(embeddings_map.values()))
-        
-        # Determine the target dimension for PCA
-        intents_for_analysis = [
-            intent for intent in self.dataset.get_intents()
-            if len(self.dataset.get_utterances(intent=intent.category)) >= min_samples_for_analysis
-        ]
-        
-        if len(intents_for_analysis) < 2:
-            logger.warning("Fewer than 2 intents meet the minimum sample requirement. Skipping boundary violation detection.")
+        pca_results = self._get_reduced_embeddings_with_pca(embeddings_map, min_samples_for_analysis)
+        reduced_embeddings_map = pca_results.get("reduced_map", {})
+        target_dim = pca_results.get("target_dim", 0)
+        intents_for_analysis = pca_results.get("intents_for_analysis", [])
+
+        if not reduced_embeddings_map or target_dim == 0:
+            logger.warning("PCA reduction failed or yielded no dimensions. Skipping boundary violation detection.")
             return []
-
-        n_min = min(
-            len(self.dataset.get_utterances(intent=intent.category)) for intent in intents_for_analysis
-        )
-        
-        target_dim = min(n_min - 1, all_embeddings.shape[1])
-        logger.info(f"Applying PCA to reduce embedding dimension to {target_dim} (based on min samples {n_min}).")
-
-        pca = PCA(n_components=target_dim, random_state=42)
-        reduced_embeddings_matrix = pca.fit_transform(all_embeddings)
-
-        # Create a new map from utterance text to its reduced-dimension embedding
-        utterance_texts = list(embeddings_map.keys())
-        reduced_embeddings_map = {
-            text: reduced_vec for text, reduced_vec in zip(utterance_texts, reduced_embeddings_matrix)
-        }
 
         # --- Analysis in Reduced Dimension Space ---
         intent_stats = {}
@@ -344,39 +368,47 @@ class CLUProcessor:
     def audit_global_clusters(
         self,
         embeddings_map: Dict[str, np.ndarray],
-        min_cluster_size: int = 5,
+        min_cluster_size: int = 15,
         min_samples: Optional[int] = None,
+        min_samples_for_analysis: int = 15,
     ) -> Dict:
         """
         Performs a global clustering audit using HDBSCAN to find potential overlaps.
+        This operation is performed in a PCA-reduced dimensional space for better results.
 
         Args:
             embeddings_map: A map from utterance text to its embedding.
             min_cluster_size: The minimum size of clusters to be considered by HDBSCAN.
             min_samples: The number of samples in a neighborhood for a point to be considered as a core point.
+            min_samples_for_analysis: The minimum utterance count for an intent to be included in PCA dimension calculation.
 
         Returns:
             A dictionary containing the clustering results and an audit of each cluster.
         """
         logger.info(
-            f"Starting global clustering audit with min_cluster_size={min_cluster_size}..."
+            f"Starting global clustering audit with min_cluster_size={min_cluster_size} in PCA-reduced space..."
         )
+        
+        # Perform clustering in the PCA-reduced space for better density estimation
+        pca_results = self._get_reduced_embeddings_with_pca(embeddings_map, min_samples_for_analysis)
+        reduced_embeddings_map = pca_results.get("reduced_map", {})
+        
+        if not reduced_embeddings_map:
+            logger.warning("Could not get reduced embeddings for clustering. Aborting audit.")
+            return {"summary": {}, "clusters": [], "raw_labels": []}
 
         utterances = self.dataset.get_utterances()
         texts = [utt.text for utt in utterances]
         intents = [utt.intent for utt in utterances]
-        embeddings = np.array([embeddings_map[text] for text in texts])
+        reduced_embeddings = np.array([reduced_embeddings_map[text] for text in texts])
 
         clusterer = hdbscan.HDBSCAN(
             min_cluster_size=min_cluster_size,
             min_samples=min_samples,
-            metric="euclidean",  # HDBSCAN works well with euclidean on normalized vectors
+            metric="euclidean",
         )
-        # Normalize embeddings for distance calculation. This is mathematically equivalent
-        # to using cosine similarity for clustering purposes.
-        embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
         
-        cluster_labels = clusterer.fit_predict(embeddings)
+        cluster_labels = clusterer.fit_predict(reduced_embeddings)
 
         # Create a DataFrame for easy analysis
         df = pd.DataFrame({"text": texts, "original_intent": intents, "cluster": cluster_labels})
