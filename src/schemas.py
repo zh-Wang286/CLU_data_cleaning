@@ -80,3 +80,21 @@ class CLUProject(BaseModel):
     stringIndexType: str
     metadata: ProjectMetadata
     assets: Assets
+
+
+class BoundaryViolationConfusedWith(BaseModel):
+    """Details of the intent with which an utterance is confused."""
+
+    intent: str = Field(..., description="The intent with which the utterance is confused.")
+    p_value: float = Field(..., description="The p-value indicating the likelihood of belonging to this intent's distribution.")
+    mahalanobis_distance: float = Field(..., description="The Mahalanobis distance to this intent's distribution.")
+
+
+class BoundaryViolationRecord(BaseModel):
+    """Represents a single utterance that violates an intent boundary."""
+
+    text: str = Field(..., description="The text of the utterance.")
+    original_intent: str = Field(..., description="The original intent of the utterance.")
+    confused_with: BoundaryViolationConfusedWith = Field(
+        ..., description="Details of the intent with which this utterance is confused."
+    )

@@ -66,11 +66,12 @@ def run_all(input_file: str, output_dir: str):
 
     outliers = processor.detect_intra_intent_outliers(embeddings_map)
     cluster_audit = processor.audit_global_clusters(embeddings_map)
+    boundary_violations = processor.detect_boundary_violations(embeddings_map)
 
     # 3. Visualization Layer
     visualizer = Visualizer(dataset, output_dir=figure_path)
     visualizer.plot_intent_similarity_heatmap(embeddings_map)
-    visualizer.plot_global_scatterplot(embeddings_map)
+    visualizer.plot_global_scatterplot(embeddings_map, boundary_violations=boundary_violations)
     visualizer.plot_per_intent_scatterplots(embeddings_map, outliers)
     
     # 4. Reporting Layer
@@ -80,6 +81,7 @@ def run_all(input_file: str, output_dir: str):
     reporter.add_dataset_summary(low_utterance_intents, threshold=25)
     reporter.add_outlier_report(outliers)
     reporter.add_cluster_audit_report(cluster_audit)
+    reporter.add_boundary_violation_report(boundary_violations)
     report_path = reporter.generate(filename=report_filename)
 
     logger.success(f"Full analysis pipeline completed. Report saved to: {report_path}")

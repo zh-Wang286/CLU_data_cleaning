@@ -10,6 +10,7 @@ from loguru import logger
 
 from src.config import settings
 from src.dataset import CLUDataset
+from src.schemas import BoundaryViolationRecord
 
 
 class ReportGenerator:
@@ -109,15 +110,51 @@ class ReportGenerator:
 
         clusters = cluster_audit.get('clusters', [])
         for cluster in clusters:
-            dist_str = ", ".join([f"`{intent}` ({count})" for intent, count in cluster['intent_distribution'].items()])
+            # Format the intent distribution for better readability in the table
+            top_n = 3
+            intent_dist = cluster['intent_distribution']
+            sorted_intents = sorted(intent_dist.items(), key=lambda item: item[1], reverse=True)
+            
+            dist_parts = [f"`{intent}` ({count})" for intent, count in sorted_intents[:top_n]]
+            if len(sorted_intents) > top_n:
+                dist_parts.append("...")
+            
+            dist_str = ", ".join(dist_parts)
+
             self.report_parts.append(
                 f"| {cluster['cluster_id']} | {cluster['size']} | `{cluster['majority_intent']}` | {cluster['purity']:.2%} | {dist_str} |\n"
             )
     
+    def add_boundary_violation_report(self, violations: List[BoundaryViolationRecord]):
+        """Adds the intent boundary violation analysis to the report."""
+        report = f"""
+        ## 4. 意图边界混淆分析
+
+        本节使用马氏距离来识别那些在统计上可能属于另一个意图分布的话语。
+        高 p-value ( > 0.05) 意味着一个话语可以被合理地视为另一个意图的成员，这表明意图边界存在模糊。
+
+        """
+        self.report_parts.append(textwrap.dedent(report))
+
+        if not violations:
+            self.report_parts.append("未检测到明显的意图边界混淆。\n")
+            return
+
+        table = "| 原始意图 | 话语文本 | 最可能混淆的意图 | P-value | 马氏距离 |\n|---|---|---|---|---|\n"
+        for record in violations:
+            table += (
+                f"| `{record.original_intent}` "
+                f"| `{record.text}` "
+                f"| `{record.confused_with.intent}` "
+                f"| {record.confused_with.p_value:.4f} "
+                f"| {record.confused_with.mahalanobis_distance:.2f} |\n"
+            )
+        self.report_parts.append(table)
+
     def add_enrichment_report(self, generated_candidates: Dict[str, List[str]]):
         """Adds the data enrichment suggestions to the report."""
         report = f"""
-        ## 4. 低样本意图增广建议
+        ## 5. 低样本意图增广建议
         
         以下是为样本量不足的意图生成的候选话语，建议由人工审核后加入数据集。
         

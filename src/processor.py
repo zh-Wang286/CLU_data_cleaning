@@ -14,13 +14,15 @@ import numpy as np
 from openai import OpenAIError
 from openai.types.create_embedding_response import CreateEmbeddingResponse
 import pandas as pd
+from scipy.stats import chi2
+from sklearn.decomposition import PCA
 from sklearn.metrics.pairwise import cosine_distances
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.config import settings
 from src.dataset import CLUDataset
 from src.model_client import model_client
-from src.schemas import Utterance
+from src.schemas import BoundaryViolationRecord, Utterance
 
 
 class CLUProcessor:
@@ -208,6 +210,136 @@ class CLUProcessor:
             f"Outlier detection complete. Found outliers in {len(all_outliers)} intents."
         )
         return all_outliers
+
+    def detect_boundary_violations(
+        self,
+        embeddings_map: Dict[str, np.ndarray],
+        p_value_threshold: float = 0.05,
+        regularization_factor: float = 1e-6,
+        min_samples_for_analysis: int = 15,
+    ) -> List[BoundaryViolationRecord]:
+        """
+        Detects utterances that are statistically likely to belong to another
+        intent's distribution using Mahalanobis distance, after applying PCA
+        to handle high dimensionality.
+
+        Args:
+            embeddings_map: A map from utterance text to its embedding.
+            p_value_threshold: The p-value cutoff for flagging violations.
+            regularization_factor: A small value to ensure covariance matrix invertibility.
+            min_samples_for_analysis: Minimum utterances an intent must have to be included.
+
+        Returns:
+            A list of BoundaryViolationRecord objects for each detected violation.
+        """
+        logger.info(
+            f"Starting boundary violation detection with p-value > {p_value_threshold}..."
+        )
+
+        # --- PCA-based Dimensionality Reduction ---
+        all_embeddings = np.array(list(embeddings_map.values()))
+        
+        # Determine the target dimension for PCA
+        intents_for_analysis = [
+            intent for intent in self.dataset.get_intents()
+            if len(self.dataset.get_utterances(intent=intent.category)) >= min_samples_for_analysis
+        ]
+        
+        if len(intents_for_analysis) < 2:
+            logger.warning("Fewer than 2 intents meet the minimum sample requirement. Skipping boundary violation detection.")
+            return []
+
+        n_min = min(
+            len(self.dataset.get_utterances(intent=intent.category)) for intent in intents_for_analysis
+        )
+        
+        target_dim = min(n_min - 1, all_embeddings.shape[1])
+        logger.info(f"Applying PCA to reduce embedding dimension to {target_dim} (based on min samples {n_min}).")
+
+        pca = PCA(n_components=target_dim, random_state=42)
+        reduced_embeddings_matrix = pca.fit_transform(all_embeddings)
+
+        # Create a new map from utterance text to its reduced-dimension embedding
+        utterance_texts = list(embeddings_map.keys())
+        reduced_embeddings_map = {
+            text: reduced_vec for text, reduced_vec in zip(utterance_texts, reduced_embeddings_matrix)
+        }
+
+        # --- Analysis in Reduced Dimension Space ---
+        intent_stats = {}
+        embedding_dim = target_dim
+
+        for intent in intents_for_analysis:
+            intent_name = intent.category
+            utterances = self.dataset.get_utterances(intent=intent_name)
+            
+            intent_embeddings_reduced = np.array(
+                [reduced_embeddings_map[utt.text] for utt in utterances]
+            )
+
+            mean_vector = np.mean(intent_embeddings_reduced, axis=0)
+            cov_matrix = np.cov(intent_embeddings_reduced, rowvar=False)
+            reg_identity = np.identity(cov_matrix.shape[0]) * regularization_factor
+
+            try:
+                inv_cov_matrix = np.linalg.pinv(cov_matrix + reg_identity)
+                intent_stats[intent_name] = {
+                    "mean": mean_vector,
+                    "inv_cov": inv_cov_matrix,
+                }
+            except np.linalg.LinAlgError:
+                logger.error(
+                    f"Could not compute inv-cov matrix for intent '{intent_name}' even after PCA. Skipping."
+                )
+                continue
+        
+        logger.info(f"Calculated statistical distributions for {len(intent_stats)} intents in {target_dim}-D space.")
+
+        violations = []
+        all_utterances = self.dataset.get_utterances()
+
+        for utterance in all_utterances:
+            original_intent = utterance.intent
+            if original_intent not in intent_stats:
+                continue
+
+            reduced_embedding = reduced_embeddings_map.get(utterance.text)
+            if reduced_embedding is None:
+                continue
+
+            best_violation = None
+            for target_intent, stats in intent_stats.items():
+                if target_intent == original_intent:
+                    continue
+
+                delta = reduced_embedding - stats["mean"]
+                mahalanobis_sq = delta.T @ stats["inv_cov"] @ delta
+                if mahalanobis_sq < 0: continue # Should not happen with pinv
+                
+                mahalanobis_dist = np.sqrt(mahalanobis_sq)
+                p_value = 1 - chi2.cdf(mahalanobis_sq, df=embedding_dim)
+
+                if p_value > p_value_threshold:
+                    if best_violation is None or p_value > best_violation.confused_with.p_value:
+                        best_violation = BoundaryViolationRecord(
+                            text=utterance.text,
+                            original_intent=original_intent,
+                            confused_with={
+                                "intent": target_intent,
+                                "p_value": p_value,
+                                "mahalanobis_distance": mahalanobis_dist,
+                            },
+                        )
+
+            if best_violation:
+                violations.append(best_violation)
+        
+        violations.sort(key=lambda v: v.confused_with.p_value, reverse=True)
+
+        logger.success(
+            f"Boundary violation detection complete. Found {len(violations)} potential violations."
+        )
+        return violations
 
     def audit_global_clusters(
         self,

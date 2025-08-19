@@ -13,6 +13,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import umap
 
 from src.dataset import CLUDataset
+from src.schemas import BoundaryViolationRecord
 
 
 class Visualizer:
@@ -149,13 +150,17 @@ class Visualizer:
         return embeddings_2d
 
     def plot_global_scatterplot(
-        self, embeddings_map: Dict[str, np.ndarray], save: bool = True
+        self,
+        embeddings_map: Dict[str, np.ndarray],
+        boundary_violations: Optional[List[BoundaryViolationRecord]] = None,
+        save: bool = True,
     ) -> Optional[plt.Figure]:
         """
         Generates a 2D scatter plot of all utterances after UMAP reduction.
 
         Args:
             embeddings_map: A map from utterance text to its embedding.
+            boundary_violations: A list of identified boundary violation records to highlight.
             save: Whether to save the plot to a file.
 
         Returns:
@@ -165,26 +170,82 @@ class Visualizer:
         utterances = self.dataset.get_utterances()
         embeddings = np.array([embeddings_map[utt.text] for utt in utterances])
         intents = [utt.intent for utt in utterances]
+        texts = [utt.text for utt in utterances]
 
         embeddings_2d = self._reduce_dimensions_umap(embeddings)
 
         df = pd.DataFrame(embeddings_2d, columns=["x", "y"])
         df["intent"] = intents
+        df["text"] = texts
+        
+        # Add a column for violation status
+        violation_texts = {v.text for v in boundary_violations} if boundary_violations else set()
+        df["is_violation"] = df["text"].apply(lambda t: t in violation_texts)
 
         fig, ax = plt.subplots(figsize=(16, 12))
+        
+        # Plot normal points first
+        normal_df = df[~df["is_violation"]]
         sns.scatterplot(
-            data=df,
+            data=normal_df,
             x="x",
             y="y",
             hue="intent",
             palette="viridis",
             s=50,
-            alpha=0.7,
+            alpha=0.6,
             ax=ax,
+            legend="full"
         )
-        ax.set_title("全局话语分布 (UMAP)")
+        
+        # Plot violation points on top with a distinct marker
+        violation_df = df[df["is_violation"]]
+        if not violation_df.empty:
+            sns.scatterplot(
+                data=violation_df,
+                x="x",
+                y="y",
+                hue="intent",
+                palette="viridis",
+                marker="^",  # Use a triangle for violations
+                s=150,       # Make them larger
+                edgecolor="yellow",
+                linewidth=2,
+                ax=ax,
+                legend=False # Do not add a second legend for violations
+            )
+
+        ax.set_title("全局话语分布 (UMAP) - 黄边三角形表示边界混淆点")
         ax.legend(title='意图', bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.tight_layout()
+        
+        # --- Add text box for top violations ---
+        if boundary_violations:
+            top_n = 15
+            # Violations are pre-sorted by p-value descending from the processor
+            top_violations = boundary_violations[:top_n]
+            
+            report_lines = [f"边界混淆话语 Top {len(top_violations)} (按p-value排序):"]
+            for i, v in enumerate(top_violations):
+                # Truncate long utterance text for display
+                text = v.text if len(v.text) < 50 else v.text[:47] + "..."
+                line = (
+                    f"{i+1:2d}. [{v.original_intent}] '{text}' -> "
+                    f"[{v.confused_with.intent}] (p={v.confused_with.p_value:.3f})"
+                )
+                report_lines.append(line)
+            
+            report_text = "\n".join(report_lines)
+
+            # Adjust figure layout to make space for the text at the bottom
+            fig.subplots_adjust(bottom=0.3)
+            
+            # Add the text box to the figure
+            fig.text(0.01, 0.25, report_text, 
+                     ha='left', va='top', 
+                     fontsize=9, wrap=False, 
+                     bbox=dict(boxstyle='round,pad=0.5', fc='#EFEFEF', alpha=0.8))
+
+        plt.tight_layout(rect=[0, 0, 0.9, 1]) # Adjust tight_layout to leave space for legend
 
         if save:
             save_path = self.output_dir / "global_scatterplot.png"
