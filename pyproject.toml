@@ -1,18 +1,82 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "clu-data-cleaning"
+name = "clu_data_cleaning"
 version = "0.1.0"
-description = "Add your description here"
+authors = [
+  { name="AI Assistant", email="assistant@example.com" },
+]
+description = "Azure CLU data cleaning and analysis system."
 readme = "README.md"
 requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
 dependencies = [
     "hdbscan>=0.8.40",
     "llvmlite>=0.41",
-    "matplotlib>=3.10.5",
     "numba>=0.58",
     "numpy<2.0",
     "openai>=1.99.9",
+    "scikit-learn",
+    "umap-learn>=0.5.6",
+
     "pandas>=2.3.1",
+    "pydantic>=2.11.7",
+    "pydantic-settings",
+
+    "matplotlib>=3.10.5",
     "plotly>=6.3.0",
     "seaborn>=0.13.2",
-    "umap-learn>=0.5.6",
+
+    "click",
+    "loguru>=0.7.3",
+    "tenacity",
+
+    "black>=25.1.0",
+    "isort>=6.0.1",
 ]
+
+[tool.yapf]
+based_on_style = "google"
+column_limit = 127
+split_before_named_assigns = true
+split_before_first_argument = true
+dedent_closing_brackets = true
+coalesce_brackets = true
+blank_line_before_nested_class_or_def = true
+blank_lines_between_top_level_imports_and_variables = 2
+
+[tool.flake8]
+max-line-length = 127
+exclude = [".git", "__pycache__", "build", "dist", ".venv"]
+per-file-ignores = "__init__.py:F401"
+extend-ignore = "E203"
+
+[tool.isort]
+profile = "google"
+line_length = 127
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+sections = [
+    "FUTURE",
+    "STDLIB",
+    "THIRDPARTY",
+    "FIRSTPARTY",
+    "LOCALFOLDER",
+]
+known_first_party = ["src"]
+skip = [".gitignore", ".venv"]
+force_single_line = false
+combine_as_imports = true
+split_on_trailing_comma = false
+order_by_type = true
+case_sensitive = true
