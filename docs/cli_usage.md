@@ -25,6 +25,7 @@ python main.py run-all --input-file <你的数据文件路径>
 | `--input-file` | 文件路径 | N/A | 是 | 指向你的 CLU 项目 JSON 文件的路径 (例如: `data/IT_01_1.json`)。 |
 | `--output-dir` | 目录路径 | `outputs` | 否 | 用于存放所有输出结果（报告、图表、缓存）的根目录。 |
 | `--min-samples` | 整数 | `15` | 否 | 设定一个意图必须包含的最小语料数。样本量低于此值的意图，将不会被纳入“意图边界混淆分析”和“全局聚类审计”这两项计算中。 |
+| `--outlier-threshold` | `90pct` `95pct` 或 `iqr` | `95pct` | 否 | 意图内异常点检测的阈值策略。<br>- `90pct`: 使用90百分位。<br>- `95pct`: 使用95百分位。<br>- `iqr`: 使用标准IQR（四分位距）方法。 |
 | `--sort-by` | `p_value` 或 `intent` | `p_value` | 否 | 指定“意图边界混淆分析”报告表格的排序方式。<br>- `p_value`: 按 p-value 从高到低排序，便于快速定位最严重的混淆问题。<br>- `intent`: 按原始意图的字母顺序排序，便于对特定意图进行系统性审查。 |
 
 ### 2.3. 使用示例
@@ -32,6 +33,10 @@ python main.py run-all --input-file <你的数据文件路径>
 -   **以最小样本数为 10，并让报告按意图名称排序:**
     ```bash
     python main.py run-all --input-file data/IT_01_1.json --min-samples 10 --sort-by intent
+    ```
+-   **使用90百分位作为异常点检测阈值:**
+    ```bash
+    python main.py run-all --input-file data/IT_01_1.json --outlier-threshold 90pct
     ```
 
 ---
