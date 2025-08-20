@@ -45,7 +45,13 @@ def cli():
     default='p_value',
     help="Sort key for the boundary violation report ('p_value' or 'intent').",
 )
-def run_all(input_file: str, output_dir: str, min_samples: int, sort_by: str):
+@click.option(
+    "--outlier-threshold",
+    type=click.Choice(['90pct', '95pct', 'iqr'], case_sensitive=False),
+    default='95pct',
+    help="Threshold policy for outlier detection ('90pct', '95pct', or 'iqr').",
+)
+def run_all(input_file: str, output_dir: str, min_samples: int, sort_by: str, outlier_threshold: str):
     """
     Run the entire analysis pipeline: validation, outlier detection,
     clustering, visualization, and reporting.
@@ -53,6 +59,15 @@ def run_all(input_file: str, output_dir: str, min_samples: int, sort_by: str):
     run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     input_path = Path(input_file)
     output_path = Path(output_dir)
+    
+    # Create a dictionary of the run parameters for reporting
+    run_params = {
+        "input_file": input_file,
+        "output_dir": output_dir,
+        "min_samples": min_samples,
+        "sort_by": sort_by,
+        "outlier_threshold": outlier_threshold,
+    }
     
     # Create timestamped directories for figures
     figure_path = output_path / "figures" / run_timestamp
@@ -76,7 +91,7 @@ def run_all(input_file: str, output_dir: str, min_samples: int, sort_by: str):
     processor = CLUProcessor(dataset, output_dir=output_path)
     embeddings_map = processor.get_all_embeddings()
 
-    outliers = processor.detect_intra_intent_outliers(embeddings_map)
+    outliers = processor.detect_intra_intent_outliers(embeddings_map, threshold_policy=outlier_threshold)
     cluster_audit = processor.audit_global_clusters(embeddings_map, min_samples_for_analysis=min_samples)
     boundary_violations = processor.detect_boundary_violations(embeddings_map, min_samples_for_analysis=min_samples)
 
@@ -90,6 +105,7 @@ def run_all(input_file: str, output_dir: str, min_samples: int, sort_by: str):
     report_filename = f"clu_audit_report_{run_timestamp}.md"
     reporter = ReportGenerator(dataset, output_dir=report_path_dir)
     reporter.add_header()
+    reporter.add_run_parameters(run_params)
     reporter.add_dataset_summary(low_utterance_intents, threshold=25)
     reporter.add_outlier_report(outliers)
     reporter.add_cluster_audit_report(cluster_audit)

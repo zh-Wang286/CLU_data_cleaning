@@ -283,12 +283,19 @@ class Visualizer:
             intent_name = intent.category
             utterances = self.dataset.get_utterances(intent=intent_name)
             
-            if len(utterances) < 2:
-                logger.warning(f"Skipping plot for intent '{intent_name}': not enough samples ({len(utterances)}).")
+            # UMAP's spectral initialization can fail with very few samples (e.g., <= 3).
+            # Skip plotting for intents with insufficient data points.
+            if len(utterances) < 4:
+                logger.warning(
+                    f"Skipping plot for intent '{intent_name}': "
+                    f"not enough samples ({len(utterances)} < 4)."
+                )
                 continue
 
             embeddings = np.array([embeddings_map[utt.text] for utt in utterances])
-            embeddings_2d = self._reduce_dimensions_umap(embeddings, n_neighbors=min(15, len(utterances)-1))
+            # Adjust n_neighbors to be less than the number of samples
+            n_neighbors = min(15, len(utterances) - 1)
+            embeddings_2d = self._reduce_dimensions_umap(embeddings, n_neighbors=n_neighbors)
 
             df = pd.DataFrame(embeddings_2d, columns=['x', 'y'])
             df['text'] = [utt.text for utt in utterances]

@@ -34,6 +34,31 @@ class ReportGenerator:
             f"ReportGenerator initialized. Reports will be saved to '{self.output_dir.resolve()}'"
         )
 
+    def add_run_parameters(self, params: Dict[str, any]):
+        """Adds a summary of the run parameters to the report."""
+        run_params_header = """
+        ## 0. 运行参数摘要
+
+        本节记录了用于生成此报告的分析任务所使用的全部参数。
+        """
+        self.report_parts.append(textwrap.dedent(run_params_header))
+
+        table = "| 参数 | 描述 | 值 |\n|---|---|---|\n"
+        # A dictionary to hold human-readable descriptions for each parameter
+        descriptions = {
+            "input_file": "用于分析的 CLU 数据源文件路径",
+            "output_dir": "所有分析产物（报告、图表）的根目录",
+            "min_samples": "意图被纳入边界分析和聚类分析所需的最小语料数",
+            "sort_by": "边界混淆报告的排序依据",
+            "outlier_threshold": "意图内异常点检测的判断阈值策略",
+        }
+
+        for key, value in params.items():
+            description = descriptions.get(key, "N/A")
+            table += f"| `{key}` | {description} | `{value}` |\n"
+
+        self.report_parts.append(table)
+
     def add_header(self):
         """Adds the main title and summary section to the report."""
         project_name = self.dataset.project.metadata.projectName
@@ -143,12 +168,12 @@ class ReportGenerator:
         # Sort based on the user's choice
         if sort_by == 'intent':
             sorted_violations = sorted(violations, key=lambda v: v.original_intent)
-            report += " (按原始意图排序)\n"
+            report_header = report + " (按原始意图排序)\n"
         else: # Default to p_value
             sorted_violations = sorted(violations, key=lambda v: v.confused_with.p_value, reverse=True)
-            report += " (按 p-value 降序排序)\n"
+            report_header = report + " (按 p-value 降序排序)\n"
 
-        self.report_parts.append(textwrap.dedent(report))
+        self.report_parts.append(textwrap.dedent(report_header))
 
         table = "| 原始意图 | 语料文本 | 最可能混淆的意图 | P-value | 马氏距离 |\n|---|---|---|---|---|\n"
         for record in sorted_violations:

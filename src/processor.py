@@ -131,7 +131,7 @@ class CLUProcessor:
         embeddings_map: Dict[str, np.ndarray],
         method: Literal["knn", "lof"] = "knn",
         k: int = 1,
-        threshold_policy: Literal["95pct", "iqr"] = "95pct",
+        threshold_policy: Literal["90pct", "95pct", "iqr"] = "95pct",
     ) -> Dict[str, List[Dict]]:
         """
         Detects outliers within each intent based on embedding distances.
@@ -140,7 +140,7 @@ class CLUProcessor:
             embeddings_map: A map from utterance text to its embedding.
             method: The outlier detection method to use ('knn' or 'lof'). Currently, only 'knn' is implemented.
             k: The number of nearest neighbors to consider for the k-NN distance.
-            threshold_policy: The policy to determine the outlier threshold ('95pct' or 'iqr').
+            threshold_policy: The policy to determine the outlier threshold ('90pct', '95pct', or 'iqr').
 
         Returns:
             A dictionary where keys are intent names and values are lists of
@@ -169,15 +169,45 @@ class CLUProcessor:
             # Calculate pairwise cosine distances
             distances = cosine_distances(intent_embeddings)
 
-            # For each point, find the distance to its k-th nearest neighbor
-            np.partition(distances, k, axis=1)
-            k_nearest_distances = distances[:, k]
+            # For each point, find the distance to its k-th nearest neighbor.
+            # We exclude self-distance by creating a copy of the distance matrix
+            # and setting its diagonal to infinity before sorting each row.
+            if k < 1:
+                raise ValueError("k must be at least 1 for k-NN distance.")
+
+            # Create a copy to avoid modifying the original distance matrix.
+            distances_no_self = distances.copy()
+            # Exclude self-distance by setting the diagonal to infinity.
+            np.fill_diagonal(distances_no_self, np.inf)
+
+            # Sort distances in each row to find the k-th nearest neighbor reliably.
+            sorted_distances = np.sort(distances_no_self, axis=1)
+            
+            # The k-th nearest distance is at the (k-1)th index after sorting.
+            k_nearest_distances = sorted_distances[:, k - 1]
+            
+            # Sanity check to ensure no invalid (inf) distances were selected,
+            # which could happen if k is larger than the number of available neighbors.
+            if not np.isfinite(k_nearest_distances).all():
+                logger.error(f"Invalid distances (inf) found for intent '{intent_name}' with k={k}. This may be due to k being too large for the number of samples. Skipping intent.")
+                continue
 
             # Determine threshold
-            if threshold_policy == "95pct":
-                threshold = np.percentile(k_nearest_distances, 95)
+            # NOTE: The finite_distances check is now largely redundant due to the check
+            # above, but it is kept as a final safeguard.
+            finite_distances = k_nearest_distances[np.isfinite(k_nearest_distances)]
+            if len(finite_distances) == 0:
+                logger.warning(
+                    f"Could not determine a finite distance threshold for intent '{intent_name}'. Skipping."
+                )
+                continue
+
+            if threshold_policy == "90pct":
+                threshold = np.percentile(finite_distances, 90)
+            elif threshold_policy == "95pct":
+                threshold = np.percentile(finite_distances, 95)
             elif threshold_policy == "iqr":
-                q1, q3 = np.percentile(k_nearest_distances, [25, 75])
+                q1, q3 = np.percentile(finite_distances, [25, 75])
                 iqr = q3 - q1
                 threshold = q3 + 1.5 * iqr
             else:
