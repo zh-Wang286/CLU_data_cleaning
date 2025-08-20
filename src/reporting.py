@@ -229,3 +229,74 @@ class ReportGenerator:
             raise
 
         return save_path
+
+    def generate_targeted_report(self, violations: List[BoundaryViolationRecord], target_intents: List[str], sort_by: str = "p_value") -> Path:
+        """
+        Generates and saves a specific report for targeted boundary violation analysis.
+
+        Args:
+            violations: A list of detected boundary violation records.
+            target_intents: The list of intents that were analyzed.
+            sort_by: The criteria to sort the violation records.
+
+        Returns:
+            The path to the generated report file.
+        """
+        run_time = datetime.now()
+        project_name = self.dataset.project.metadata.projectName
+
+        # --- Report Header ---
+        header = f"""
+        # CLU 局部边界混淆分析报告
+        
+        - **项目:** `{project_name}`
+        - **运行ID:** `{settings.run_id}`
+        - **时间戳:** `{run_time.strftime("%Y-%m-%d %H:%M:%S")}`
+        
+        ---
+        """
+        self.report_parts.append(textwrap.dedent(header))
+
+        # --- Analysis Parameters ---
+        params_header = """
+        ## 1. 分析参数
+        
+        本节记录了本次局部对比分析所使用的参数。
+        """
+        self.report_parts.append(textwrap.dedent(params_header))
+        
+        table = "| 参数 | 值 |\n|---|---|\n"
+        table += f"| `target_intents` | `[{', '.join(target_intents)}]` |\n"
+        table += f"| `sort_by` | `{sort_by}` |\n"
+        self.report_parts.append(table)
+
+        # --- Re-use the boundary violation section ---
+        # Temporarily clear other report parts to only include the violation section
+        original_parts = self.report_parts
+        self.report_parts = []
+        self.add_boundary_violation_report(violations, sort_by)
+        violation_report_part = "\n".join(self.report_parts)
+
+        # Restore original parts and add the new one
+        self.report_parts = original_parts
+        self.report_parts.append(violation_report_part)
+        
+        # --- Finalize and Save ---
+        # Create a clean filename from the target intents
+        safe_filename_intents = "_vs_".join(
+            "".join(c for c in intent if c.isalnum()).rstrip() for intent in target_intents
+        )
+        report_filename = f"targeted_analysis_report_{safe_filename_intents}.md"
+
+        final_report_content = "\n".join(self.report_parts)
+        save_path = self.output_dir / report_filename
+
+        try:
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(final_report_content)
+            logger.success(f"Successfully generated targeted analysis report: {save_path}")
+        except IOError as e:
+            logger.error(f"Failed to write targeted report to {save_path}: {e}")
+            raise
+            
+        return save_path

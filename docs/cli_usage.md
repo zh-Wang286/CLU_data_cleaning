@@ -66,3 +66,40 @@ python main.py enrich --input-file <你的数据文件路径>
     ```bash
     python main.py enrich --input-file data/IT_01_1.json --threshold 30 --dry-run
     ```
+
+## 4. 局部意图对比分析 (`compare-intents`)
+
+此命令针对您指定的2个或多个意图，运行一次局部的、高精度的边界混淆分析。
+
+它专门用于深入研究那些在全局分析中发现的、可能存在定义重叠的意图对。与全局分析（`run-all`）不同，此命令的输出（报告和散点图）将只包含您指定的意图，从而提供一个更清晰、更聚焦的视图。
+
+**核心优势**:
+-   **聚焦分析**: 排除无关意图的干扰，让您可以专注于辨析特定意图间的边界问题。
+-   **全局一致性**: 分析是在与 `run-all` 命令相同的全局向量空间（经过全局PCA降维）中进行的，确保了结果的可比性和一致性。
+
+### 4.1. 参数
+
+-   `--input-file` 或 `-i` (**必需**): CLU 项目的 JSON 文件路径。
+-   `--target-intents` 或 `-t` (**必需**, 可多次使用): 指定要对比分析的意图名称。每次使用此选项指定一个意图，至少需要指定两个。
+-   `--output-dir` 或 `-o` (可选): 指定报告和图表的输出目录。如果未指定，会自动在 `outputs/` 目录下创建一个带时间戳和意图名称的描述性文件夹。
+-   `--min-samples` 或 `-m` (可选): 意图构建统计模型所需的最小语料数（默认为15）。
+-   `--sort-by` (可选): 报告中边界混淆语料的排序方式，可选值为 `p_value` (默认) 或 `intent`。
+
+### 4.2. 示例
+
+假设您想深入分析 "意图A" 和 "意图B" 之间的关系：
+
+```bash
+python main.py compare-intents -i data/clu_project.json -t "意图A" -t "意图B"
+```
+
+如果您想对比三个意图，并指定输出目录：
+
+```bash
+python main.py compare-intents \
+  -i data/clu_project.json \
+  -t "意图A" \
+  -t "意图B" \
+  -t "意图C" \
+  -o outputs/my_comparison
+```

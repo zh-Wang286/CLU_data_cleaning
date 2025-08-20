@@ -23,6 +23,7 @@ def cli():
 @cli.command()
 @click.option(
     "--input-file",
+    "-i",
     type=click.Path(exists=True, dir_okay=False, resolve_path=True),
     required=True,
     help="Path to the input CLU JSON file.",
@@ -118,6 +119,7 @@ def run_all(input_file: str, output_dir: str, min_samples: int, sort_by: str, ou
 @cli.command()
 @click.option(
     "--input-file",
+    "-i",
     type=click.Path(exists=True, dir_okay=False, resolve_path=True),
     required=True,
     help="Path to the input CLU JSON file.",
@@ -181,6 +183,103 @@ def enrich(input_file: str, output_dir: str, threshold: int, dry_run: bool):
         report_filename = f"enrichment_report_{run_timestamp}.md"
         report_path = reporter.generate(filename=report_filename)
         logger.success(f"Enrichment report saved successfully to: {report_path}")
+
+
+@cli.command()
+@click.option(
+    "--input-file",
+    "-i",
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+    required=True,
+    help="Path to the CLU project JSON file.",
+)
+@click.option(
+    '--target-intents', '-t',
+    multiple=True,
+    required=True,
+    help="Specify an intent for targeted analysis. Use this option multiple times (at least 2 required).",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, resolve_path=True),
+    default="outputs",
+    help="Root directory to save analysis results. A specific subfolder will be created inside for this run.",
+)
+@click.option(
+    "--min-samples",
+    type=int,
+    default=15,
+    help="Minimum utterances for an intent to be used for building a statistical distribution.",
+)
+@click.option(
+    "--sort-by",
+    type=click.Choice(['p_value', 'intent'], case_sensitive=False),
+    default='p_value',
+    help="Sort key for the boundary violation report.",
+)
+def compare_intents(
+    input_file: str,
+    target_intents: tuple[str, ...],
+    output_dir: str,
+    min_samples: int,
+    sort_by: str,
+):
+    """
+    Run a targeted boundary violation analysis on a specific subset of intents.
+    """
+    if len(target_intents) < 2:
+        logger.error("At least two intents must be specified using the '-t' option.")
+        return
+
+    run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    input_path = Path(input_file)
+    
+    root_output_path = Path(output_dir)
+    
+    # Create a descriptive, specific subdirectory for this analysis run's outputs
+    safe_intents_str = "_vs_".join("".join(c for c in intent if c.isalnum()) for intent in target_intents)
+    targeted_output_path = root_output_path / f"targeted_analysis_{safe_intents_str}_{run_timestamp}"
+
+    figure_path = targeted_output_path / "figures"
+    report_path_dir = targeted_output_path / "reports"
+    figure_path.mkdir(parents=True, exist_ok=True)
+    report_path_dir.mkdir(parents=True, exist_ok=True)
+    
+    logger.info(f"Starting targeted analysis for intents: {list(target_intents)}")
+    logger.info(f"Outputs will be saved to: {targeted_output_path.resolve()}")
+
+    # 1. Initialization
+    dataset = CLUDataset.from_json(input_path)
+    # Initialize processor with the ROOT output dir to use the shared cache
+    processor = CLUProcessor(dataset, output_dir=root_output_path)
+    # Initialize visualizer and reporter with the specific run directory
+    visualizer = Visualizer(dataset, output_dir=figure_path)
+    reporter = ReportGenerator(dataset, output_dir=report_path_dir)
+    
+    # 2. Processing
+    logger.info("Step 1/3: Computing embeddings...")
+    embeddings_map = processor.get_all_embeddings()
+    
+    logger.info("Step 2/3: Running targeted boundary violation analysis...")
+    violations = processor.detect_targeted_boundary_violations(
+        embeddings_map=embeddings_map,
+        target_intents=list(target_intents),
+        min_samples_for_analysis=min_samples,
+    )
+    
+    # 3. Reporting and Visualization
+    logger.info("Step 3/3: Generating outputs...")
+    report_path = reporter.generate_targeted_report(
+        violations=violations, target_intents=list(target_intents), sort_by=sort_by
+    )
+    
+    visualizer.plot_targeted_scatterplot(
+        embeddings_map=embeddings_map,
+        target_intents=list(target_intents),
+        boundary_violations=violations,
+    )
+    
+    logger.success(f"Targeted analysis complete. Report saved to: {report_path}")
 
 
 if __name__ == "__main__":

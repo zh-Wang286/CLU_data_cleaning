@@ -256,6 +256,98 @@ class Visualizer:
 
         return fig
 
+    def plot_targeted_scatterplot(
+        self,
+        embeddings_map: Dict[str, np.ndarray],
+        target_intents: List[str],
+        boundary_violations: Optional[List[BoundaryViolationRecord]] = None,
+        save: bool = True,
+    ) -> Optional[plt.Figure]:
+        """
+        Generates a 2D scatter plot for a targeted subset of intents after UMAP reduction.
+        It uses the same global UMAP transformation for consistency.
+
+        Args:
+            embeddings_map: A map from utterance text to its embedding.
+            target_intents: A list of intent names to include in the plot.
+            boundary_violations: A list of identified boundary violation records to highlight.
+            save: Whether to save the plot to a file.
+
+        Returns:
+            The matplotlib Figure object if not saved, otherwise None.
+        """
+        logger.info(f"Generating targeted scatter plot for intents: {target_intents}...")
+        
+        # --- 1. Perform UMAP on the entire dataset to get a consistent 2D projection ---
+        all_utterances = self.dataset.get_utterances()
+        all_embeddings = np.array([embeddings_map[utt.text] for utt in all_utterances])
+        all_intents = [utt.intent for utt in all_utterances]
+        all_texts = [utt.text for utt in all_utterances]
+        
+        embeddings_2d = self._reduce_dimensions_umap(all_embeddings)
+        
+        df = pd.DataFrame(embeddings_2d, columns=["x", "y"])
+        df["intent"] = all_intents
+        df["text"] = all_texts
+
+        # --- 2. Filter the DataFrame to include only the target intents ---
+        targeted_df = df[df["intent"].isin(target_intents)].copy()
+        if targeted_df.empty:
+            logger.warning("No utterances found for the targeted intents. Cannot generate plot.")
+            return None
+
+        # --- 3. Highlight boundary violations within the targeted group ---
+        violation_texts = {v.text for v in boundary_violations} if boundary_violations else set()
+        targeted_df["is_violation"] = targeted_df["text"].apply(lambda t: t in violation_texts)
+        
+        fig, ax = plt.subplots(figsize=(16, 12))
+        
+        # # Plot normal points
+        # normal_df = targeted_df[~targeted_df["is_violation"]]
+        sns.scatterplot(
+            data=targeted_df,
+            x="x",
+            y="y",
+            hue="intent",
+            palette="bright",
+            s=80,
+            alpha=0.7,
+            ax=ax,
+            legend="full"
+        )
+        
+        # # Plot violation points
+        # violation_df = targeted_df[targeted_df["is_violation"]]
+        # if not violation_df.empty:
+        #     sns.scatterplot(
+        #         data=violation_df,
+        #         x="x",
+        #         y="y",
+        #         hue="intent",
+        #         palette="viridis",
+        #         marker="^",
+        #         s=200,
+        #         edgecolor="red",
+        #         linewidth=2,
+        #         ax=ax,
+        #         legend=False
+        #     )
+            
+        # ax.set_title(f"局部意图语料分布 (UMAP) - 红边三角形表示边界混淆点\n意图: {', '.join(target_intents)}")
+        ax.legend(title='意图', bbox_to_anchor=(1.05, 1), loc='upper left')
+        
+        plt.tight_layout(rect=[0, 0, 0.9, 1])
+
+        if save:
+            safe_filename = "".join(c for c in "_vs_".join(target_intents) if c.isalnum() or c in (' ', '_', '-')).rstrip()
+            save_path = self.output_dir / f"targeted_scatterplot_{safe_filename}.png"
+            fig.savefig(save_path, dpi=300)
+            logger.info(f"Targeted scatter plot saved to {save_path}")
+            plt.close(fig)
+            return None
+
+        return fig
+
     def plot_per_intent_scatterplots(
         self,
         embeddings_map: Dict[str, np.ndarray],
