@@ -122,3 +122,6 @@ dmypy.json
 
 # Outputs
 outputs/
+
+# web
+explanation_website/
