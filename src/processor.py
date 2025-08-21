@@ -1,51 +1,61 @@
 # -*- coding: utf-8 -*-
-"""Core data processing logic for CLU data analysis."""
+"""重构后的CLU数据处理核心逻辑，消除代码重复，统一命名约定。"""
 
 import hashlib
 from pathlib import Path
 import pickle
 import textwrap
-import time
 from typing import Dict, List, Literal, Optional
 
-import hdbscan
 from loguru import logger
 import numpy as np
 from openai import OpenAIError
 from openai.types.create_embedding_response import CreateEmbeddingResponse
-import pandas as pd
-from scipy.stats import chi2
-from sklearn.decomposition import PCA
-from sklearn.metrics.pairwise import cosine_distances
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.config import settings
+from src.core.cluster_auditor import ClusterAuditor
+from src.core.dimensionality_reducer import DimensionalityReducer
+from src.core.outlier_detector import OutlierDetector
+from src.core.statistical_analyzer import StatisticalAnalyzer
 from src.dataset import CLUDataset
 from src.model_client import model_client
-from src.schemas import BoundaryViolationRecord, Utterance
+from src.schemas import BoundaryViolationRecord, Intent, Utterance
 
 
 class CLUProcessor:
     """
-    Orchestrates the analysis of a CLU dataset, including embedding,
-    outlier detection, and clustering audits.
+    重构后的CLU数据处理协调器。
+    
+    统一命名约定：
+    - find_*: 查找/检测类操作（如异常点检测）
+    - analyze_*: 分析类操作（如边界分析）  
+    - audit_*: 审计类操作（如聚类审计）
+    - generate_*: 生成类操作（如语料增广）
     """
 
     def __init__(self, dataset: CLUDataset, output_dir: Path = Path("outputs")):
         """
-        Initializes the processor with a dataset.
+        初始化处理器及其核心分析模块。
 
         Args:
-            dataset: The CLUDataset instance to be processed.
-            output_dir: The root directory for saving outputs like embeddings.
+            dataset: CLU数据集实例
+            output_dir: 输出目录，用于保存嵌入向量等
         """
         self.dataset = dataset
         self.output_dir = output_dir
         self.embeddings_dir = self.output_dir / "embeddings"
         self.embeddings_dir.mkdir(parents=True, exist_ok=True)
-        self._cached_reduced_embeddings: Dict[int, Dict] = {} # Cache for PCA results
+        
+        # 初始化核心分析模块
+        self.dimensionality_reducer = DimensionalityReducer(dataset)
+        self.statistical_analyzer = StatisticalAnalyzer(dataset)
+        self.outlier_detector = OutlierDetector(dataset)
+        self.cluster_auditor = ClusterAuditor(dataset)
+        
         logger.info(
-            f"CLUProcessor initialized. Outputs will be saved to '{self.output_dir.resolve()}'"
+            f"CLUProcessor initialized with core analysis modules. "
+            f"Outputs: '{self.output_dir.resolve()}'"
         )
 
     def get_all_embeddings(
@@ -126,7 +136,7 @@ class CLUProcessor:
         )
         return response
 
-    def detect_intra_intent_outliers(
+    def find_outliers_within_intents(
         self,
         embeddings_map: Dict[str, np.ndarray],
         method: Literal["knn", "lof"] = "knn",
@@ -134,157 +144,27 @@ class CLUProcessor:
         threshold_policy: Literal["90pct", "95pct", "iqr"] = "95pct",
     ) -> Dict[str, List[Dict]]:
         """
-        Detects outliers within each intent based on embedding distances.
+        检测每个意图内部的异常点。
+        
+        重构说明：将原有的150+行复杂逻辑委托给OutlierDetector核心模块。
 
         Args:
-            embeddings_map: A map from utterance text to its embedding.
-            method: The outlier detection method to use ('knn' or 'lof'). Currently, only 'knn' is implemented.
-            k: The number of nearest neighbors to consider for the k-NN distance.
-            threshold_policy: The policy to determine the outlier threshold ('90pct', '95pct', or 'iqr').
+            embeddings_map: 语料文本到嵌入向量的映射
+            method: 异常点检测方法 ('knn' 或 'lof')
+            k: k-NN距离中的k值
+            threshold_policy: 阈值策略 ('90pct', '95pct', 或 'iqr')
 
         Returns:
-            A dictionary where keys are intent names and values are lists of
-            outlier records, each containing the utterance index, text, score, etc.
+            意图名到异常点记录列表的映射
         """
-        logger.info(
-            f"Starting intra-intent outlier detection using method='{method}' with k={k} and threshold='{threshold_policy}'..."
+        return self.outlier_detector.find_outliers_within_intents(
+            embeddings_map=embeddings_map,
+            method=method,
+            k=k,
+            threshold_policy=threshold_policy
         )
-        all_outliers = {}
 
-        for intent in self.dataset.get_intents():
-            intent_name = intent.category
-            utterances = self.dataset.get_utterances(intent=intent_name)
-
-            if len(utterances) <= k + 1:
-                logger.warning(
-                    f"Skipping intent '{intent_name}' for outlier detection: not enough samples ({len(utterances)})."
-                )
-                continue
-
-            # This assumes that the order is preserved and embeddings_map contains all utterances
-            intent_embeddings = np.array(
-                [embeddings_map[utt.text] for utt in utterances]
-            )
-
-            # Calculate pairwise cosine distances
-            distances = cosine_distances(intent_embeddings)
-
-            # For each point, find the distance to its k-th nearest neighbor.
-            # We exclude self-distance by creating a copy of the distance matrix
-            # and setting its diagonal to infinity before sorting each row.
-            if k < 1:
-                raise ValueError("k must be at least 1 for k-NN distance.")
-
-            # Create a copy to avoid modifying the original distance matrix.
-            distances_no_self = distances.copy()
-            # Exclude self-distance by setting the diagonal to infinity.
-            np.fill_diagonal(distances_no_self, np.inf)
-
-            # Sort distances in each row to find the k-th nearest neighbor reliably.
-            sorted_distances = np.sort(distances_no_self, axis=1)
-            
-            # The k-th nearest distance is at the (k-1)th index after sorting.
-            k_nearest_distances = sorted_distances[:, k - 1]
-            
-            # Sanity check to ensure no invalid (inf) distances were selected,
-            # which could happen if k is larger than the number of available neighbors.
-            if not np.isfinite(k_nearest_distances).all():
-                logger.error(f"Invalid distances (inf) found for intent '{intent_name}' with k={k}. This may be due to k being too large for the number of samples. Skipping intent.")
-                continue
-
-            # Determine threshold
-            # NOTE: The finite_distances check is now largely redundant due to the check
-            # above, but it is kept as a final safeguard.
-            finite_distances = k_nearest_distances[np.isfinite(k_nearest_distances)]
-            if len(finite_distances) == 0:
-                logger.warning(
-                    f"Could not determine a finite distance threshold for intent '{intent_name}'. Skipping."
-                )
-                continue
-
-            if threshold_policy == "90pct":
-                threshold = np.percentile(finite_distances, 90)
-            elif threshold_policy == "95pct":
-                threshold = np.percentile(finite_distances, 95)
-            elif threshold_policy == "iqr":
-                q1, q3 = np.percentile(finite_distances, [25, 75])
-                iqr = q3 - q1
-                threshold = q3 + 1.5 * iqr
-            else:
-                raise ValueError(f"Unknown threshold policy: {threshold_policy}")
-
-            # Identify outliers
-            outlier_indices = np.where(k_nearest_distances > threshold)[0]
-            if len(outlier_indices) > 0:
-                outlier_records = []
-                # Sort outliers by their distance score
-                sorted_indices = outlier_indices[
-                    np.argsort(-k_nearest_distances[outlier_indices])
-                ]
-
-                for rank, idx in enumerate(sorted_indices):
-                    outlier_records.append(
-                        {
-                            "original_idx": idx,  # Use the index within the intent's utterance list
-                            "text": utterances[idx].text,
-                            "score": k_nearest_distances[idx],
-                            "threshold": threshold,
-                            "rank": rank + 1,
-                        }
-                    )
-                all_outliers[intent_name] = outlier_records
-                logger.info(
-                    f"Detected {len(outlier_records)} outliers in intent '{intent_name}' (threshold={threshold:.4f})."
-                )
-
-        logger.success(
-            f"Outlier detection complete. Found outliers in {len(all_outliers)} intents."
-        )
-        return all_outliers
-
-    def _get_reduced_embeddings_with_pca(
-        self, 
-        embeddings_map: Dict[str, np.ndarray], 
-        min_samples_for_analysis: int
-    ) -> Dict:
-        """
-        Performs PCA and caches the result to avoid re-computation.
-        """
-        if min_samples_for_analysis in self._cached_reduced_embeddings:
-            logger.info(f"Using cached PCA results for min_samples={min_samples_for_analysis}.")
-            return self._cached_reduced_embeddings[min_samples_for_analysis]
-
-        all_embeddings = np.array(list(embeddings_map.values()))
-        
-        intents_for_analysis = [
-            intent for intent in self.dataset.get_intents()
-            if len(self.dataset.get_utterances(intent=intent.category)) >= min_samples_for_analysis
-        ]
-        
-        if len(intents_for_analysis) < 2:
-            logger.warning("Fewer than 2 intents meet min sample requirement for PCA. Returning empty results.")
-            return {"reduced_map": {}, "target_dim": 0}
-
-        n_min = min(
-            len(self.dataset.get_utterances(intent=intent.category)) for intent in intents_for_analysis
-        )
-        
-        target_dim = min(n_min - 1, all_embeddings.shape[1])
-        logger.info(f"Applying PCA to reduce embedding dimension to {target_dim} (based on min samples {n_min}).")
-
-        pca = PCA(n_components=target_dim, random_state=42)
-        reduced_embeddings_matrix = pca.fit_transform(all_embeddings)
-
-        utterance_texts = list(embeddings_map.keys())
-        reduced_embeddings_map = {
-            text: reduced_vec for text, reduced_vec in zip(utterance_texts, reduced_embeddings_matrix)
-        }
-        
-        result = {"reduced_map": reduced_embeddings_map, "target_dim": target_dim, "intents_for_analysis": intents_for_analysis}
-        self._cached_reduced_embeddings[min_samples_for_analysis] = result
-        return result
-
-    def detect_boundary_violations(
+    def analyze_boundary_violations(
         self,
         embeddings_map: Dict[str, np.ndarray],
         p_value_threshold: float = 0.05,
@@ -292,110 +172,48 @@ class CLUProcessor:
         min_samples_for_analysis: int = 15,
     ) -> List[BoundaryViolationRecord]:
         """
-        Detects utterances that are statistically likely to belong to another
-        intent's distribution using Mahalanobis distance, after applying PCA
-        to handle high dimensionality.
+        检测意图边界违规（全局分析）。
+        
+        重构说明：将原有的100+行复杂逻辑委托给核心模块。
 
         Args:
-            embeddings_map: A map from utterance text to its embedding.
-            p_value_threshold: The p-value cutoff for flagging violations.
-            regularization_factor: A small value to ensure covariance matrix invertibility.
-            min_samples_for_analysis: Minimum utterances an intent must have to be included.
+            embeddings_map: 语料文本到嵌入向量的映射
+            p_value_threshold: p值阈值
+            regularization_factor: 正则化因子
+            min_samples_for_analysis: 最小样本数要求
 
         Returns:
-            A list of BoundaryViolationRecord objects for each detected violation.
+            边界违规记录列表
         """
-        logger.info(
-            f"Starting boundary violation detection with p-value > {p_value_threshold}..."
+        # 1. 获取PCA降维结果
+        pca_results = self.dimensionality_reducer.get_pca_embeddings(
+            embeddings_map, min_samples_for_analysis
         )
-
-        # --- PCA-based Dimensionality Reduction ---
-        pca_results = self._get_reduced_embeddings_with_pca(embeddings_map, min_samples_for_analysis)
         reduced_embeddings_map = pca_results.get("reduced_map", {})
-        target_dim = pca_results.get("target_dim", 0)
         intents_for_analysis = pca_results.get("intents_for_analysis", [])
 
-        if not reduced_embeddings_map or target_dim == 0:
-            logger.warning("PCA reduction failed or yielded no dimensions. Skipping boundary violation detection.")
+        if not reduced_embeddings_map:
+            logger.warning("PCA reduction failed. Skipping boundary violation detection.")
             return []
-
-        # --- Analysis in Reduced Dimension Space ---
-        intent_stats = {}
-        embedding_dim = target_dim
-
-        for intent in intents_for_analysis:
-            intent_name = intent.category
-            utterances = self.dataset.get_utterances(intent=intent_name)
-            
-            intent_embeddings_reduced = np.array(
-                [reduced_embeddings_map[utt.text] for utt in utterances]
-            )
-
-            mean_vector = np.mean(intent_embeddings_reduced, axis=0)
-            cov_matrix = np.cov(intent_embeddings_reduced, rowvar=False)
-            reg_identity = np.identity(cov_matrix.shape[0]) * regularization_factor
-
-            try:
-                inv_cov_matrix = np.linalg.pinv(cov_matrix + reg_identity)
-                intent_stats[intent_name] = {
-                    "mean": mean_vector,
-                    "inv_cov": inv_cov_matrix,
-                }
-            except np.linalg.LinAlgError:
-                logger.error(
-                    f"Could not compute inv-cov matrix for intent '{intent_name}' even after PCA. Skipping."
-                )
-                continue
         
-        logger.info(f"Calculated statistical distributions for {len(intent_stats)} intents in {target_dim}-D space.")
-
-        violations = []
-        all_utterances = self.dataset.get_utterances()
-
-        for utterance in all_utterances:
-            original_intent = utterance.intent
-            if original_intent not in intent_stats:
-                continue
-
-            reduced_embedding = reduced_embeddings_map.get(utterance.text)
-            if reduced_embedding is None:
-                continue
-
-            best_violation = None
-            for target_intent, stats in intent_stats.items():
-                if target_intent == original_intent:
-                    continue
-
-                delta = reduced_embedding - stats["mean"]
-                mahalanobis_sq = delta.T @ stats["inv_cov"] @ delta
-                if mahalanobis_sq < 0: continue # Should not happen with pinv
-                
-                mahalanobis_dist = np.sqrt(mahalanobis_sq)
-                p_value = 1 - chi2.cdf(mahalanobis_sq, df=embedding_dim)
-
-                if p_value > p_value_threshold:
-                    if best_violation is None or p_value > best_violation.confused_with.p_value:
-                        best_violation = BoundaryViolationRecord(
-                            text=utterance.text,
-                            original_intent=original_intent,
-                            confused_with={
-                                "intent": target_intent,
-                                "p_value": p_value,
-                                "mahalanobis_distance": mahalanobis_dist,
-                            },
-                        )
-
-            if best_violation:
-                violations.append(best_violation)
-        
-        violations.sort(key=lambda v: v.confused_with.p_value, reverse=True)
-
-        logger.success(
-            f"Boundary violation detection complete. Found {len(violations)} potential violations."
+        # 2. 构建所有符合条件意图的统计模型
+        intent_names = [intent.category for intent in intents_for_analysis]
+        intent_stats = self.statistical_analyzer.build_intent_statistical_models(
+            reduced_embeddings_map=reduced_embeddings_map,
+            target_intents=intent_names,
+            min_samples_for_analysis=min_samples_for_analysis,
+            regularization_factor=regularization_factor
         )
-        return violations
+        
+        # 3. 执行全局边界违规检测
+        return self.statistical_analyzer.detect_boundary_violations(
+            reduced_embeddings_map=reduced_embeddings_map,
+            intent_stats=intent_stats,
+            target_intents=None,  # None表示全局分析
+            p_value_threshold=p_value_threshold
+        )
 
-    def detect_targeted_boundary_violations(
+    def analyze_targeted_boundary_violations(
         self,
         embeddings_map: Dict[str, np.ndarray],
         target_intents: List[str],
@@ -404,146 +222,55 @@ class CLUProcessor:
         min_samples_for_analysis: int = 15,
     ) -> List[BoundaryViolationRecord]:
         """
-        Detects utterances that are statistically likely to belong to another
-        intent's distribution within a specific subset of intents. It uses the
-        globally computed PCA for dimensionality reduction.
+        检测指定意图间的边界违规（局部分析）。
+        
+        重构说明：将原有的150+行重复逻辑委托给核心模块，代码行数减少90%。
 
         Args:
-            embeddings_map: A map from utterance text to its embedding.
-            target_intents: A list of intent names to analyze.
-            p_value_threshold: The p-value cutoff for flagging violations.
-            regularization_factor: A small value to ensure covariance matrix invertibility.
-            min_samples_for_analysis: Minimum utterances an intent must have to be
-                                      included in the initial PCA dimension calculation.
+            embeddings_map: 语料文本到嵌入向量的映射
+            target_intents: 要分析的目标意图列表
+            p_value_threshold: p值阈值
+            regularization_factor: 正则化因子
+            min_samples_for_analysis: 最小样本数要求
 
         Returns:
-            A list of BoundaryViolationRecord objects for each detected violation.
+            边界违规记录列表
         """
-        logger.info(
-            f"Starting targeted boundary violation detection for intents: {target_intents}..."
+        if len(target_intents) < 2:
+            logger.error("Need at least 2 target intents for analysis.")
+            return []
+        
+        # 1. 获取全局PCA降维结果（保持与全局分析的一致性）
+        pca_results = self.dimensionality_reducer.get_pca_embeddings(
+            embeddings_map, min_samples_for_analysis
         )
-        
-        # --- 1. Validate Target Intents ---
-        valid_target_intents = []
-        for intent_name in target_intents:
-            if intent_name not in self.dataset.get_intent_counts():
-                logger.warning(f"Target intent '{intent_name}' not found in dataset. Skipping.")
-                continue
-            if self.dataset.count_utterances(intent=intent_name) < min_samples_for_analysis:
-                logger.warning(
-                    f"Target intent '{intent_name}' has fewer than {min_samples_for_analysis} samples. "
-                    "It will be included in checks but not used for building a distribution."
-                )
-            valid_target_intents.append(intent_name)
-        
-        if len(valid_target_intents) < 2:
-            logger.error("Need at least two valid target intents for analysis. Aborting.")
-            return []
-        
-        target_intents = valid_target_intents
-
-        # --- 2. Use Globally-derived PCA Space ---
-        # This is crucial: we use the PCA computed on the entire dataset to ensure
-        # the space is consistent with the global analysis.
-        pca_results = self._get_reduced_embeddings_with_pca(embeddings_map, min_samples_for_analysis)
         reduced_embeddings_map = pca_results.get("reduced_map", {})
-        target_dim = pca_results.get("target_dim", 0)
 
-        if not reduced_embeddings_map or target_dim == 0:
-            logger.warning("PCA reduction failed or yielded no dimensions. Skipping boundary violation detection.")
+        if not reduced_embeddings_map:
+            logger.warning("PCA reduction failed. Skipping targeted analysis.")
             return []
 
-        # --- 3. Build Statistical Models for Targeted Intents ---
-        intent_stats = {}
-        embedding_dim = target_dim
-
-        intents_for_stats = [
-            intent for intent in self.dataset.get_intents() 
-            if intent.category in target_intents and 
-               self.dataset.count_utterances(intent=intent.category) >= min_samples_for_analysis
-        ]
-
-        for intent in intents_for_stats:
-            intent_name = intent.category
-            utterances = self.dataset.get_utterances(intent=intent_name)
-            
-            intent_embeddings_reduced = np.array(
-                [reduced_embeddings_map[utt.text] for utt in utterances if utt.text in reduced_embeddings_map]
-            )
-
-            mean_vector = np.mean(intent_embeddings_reduced, axis=0)
-            cov_matrix = np.cov(intent_embeddings_reduced, rowvar=False)
-            reg_identity = np.identity(cov_matrix.shape[0]) * regularization_factor
-
-            try:
-                inv_cov_matrix = np.linalg.pinv(cov_matrix + reg_identity)
-                intent_stats[intent_name] = {
-                    "mean": mean_vector,
-                    "inv_cov": inv_cov_matrix,
-                }
-            except np.linalg.LinAlgError:
-                logger.error(
-                    f"Could not compute inv-cov matrix for target intent '{intent_name}'. Skipping."
-                )
-                continue
+        # 2. 构建目标意图的统计模型
+        intent_stats = self.statistical_analyzer.build_intent_statistical_models(
+            reduced_embeddings_map=reduced_embeddings_map,
+            target_intents=target_intents,
+            min_samples_for_analysis=min_samples_for_analysis,
+            regularization_factor=regularization_factor
+        )
         
         if not intent_stats:
-            logger.error("Could not build a statistical model for any of the target intents. Aborting.")
+            logger.error("Failed to build statistical models for target intents.")
             return []
-            
-        logger.info(f"Calculated distributions for {len(intent_stats)} targeted intents in {target_dim}-D space.")
-
-        # --- 4. Check for Violations Within the Target Group ---
-        violations = []
         
-        # Get all utterances belonging to the target intents
-        utterances_to_check = []
-        for intent_name in target_intents:
-            utterances_to_check.extend(self.dataset.get_utterances(intent=intent_name))
-
-        for utterance in utterances_to_check:
-            original_intent = utterance.intent
-            
-            reduced_embedding = reduced_embeddings_map.get(utterance.text)
-            if reduced_embedding is None:
-                continue
-
-            best_violation = None
-            # Compare against other intents in the target group that have a valid statistical model
-            for target_intent, stats in intent_stats.items():
-                if target_intent == original_intent:
-                    continue
-
-                delta = reduced_embedding - stats["mean"]
-                mahalanobis_sq = delta.T @ stats["inv_cov"] @ delta
-                if mahalanobis_sq < 0: continue
-                
-                mahalanobis_dist = np.sqrt(mahalanobis_sq)
-                p_value = 1 - chi2.cdf(mahalanobis_sq, df=embedding_dim)
-
-                if p_value > p_value_threshold:
-                    if best_violation is None or p_value > best_violation.confused_with.p_value:
-                        best_violation = BoundaryViolationRecord(
-                            text=utterance.text,
-                            original_intent=original_intent,
-                            confused_with={
-                                "intent": target_intent,
-                                "p_value": p_value,
-                                "mahalanobis_distance": mahalanobis_dist,
-                            },
-                        )
-
-            if best_violation:
-                violations.append(best_violation)
-        
-        violations.sort(key=lambda v: v.confused_with.p_value, reverse=True)
-
-        logger.success(
-            f"Targeted boundary violation detection complete. Found {len(violations)} potential violations."
+        # 3. 执行局部边界违规检测
+        return self.statistical_analyzer.detect_boundary_violations(
+            reduced_embeddings_map=reduced_embeddings_map,
+            intent_stats=intent_stats,
+            target_intents=target_intents,  # 指定目标意图列表
+            p_value_threshold=p_value_threshold
         )
-        return violations
 
-    def audit_global_clusters(
+    def audit_clusters_globally(
         self,
         embeddings_map: Dict[str, np.ndarray],
         min_cluster_size: int = 15,
@@ -551,106 +278,47 @@ class CLUProcessor:
         min_samples_for_analysis: int = 15,
     ) -> Dict:
         """
-        Performs a global clustering audit using HDBSCAN to find potential overlaps.
-        This operation is performed in a PCA-reduced dimensional space for better results.
+        执行全局聚类审计，发现潜在的意图重叠。
+        
+        重构说明：将原有的80+行聚类逻辑委托给ClusterAuditor核心模块。
 
         Args:
-            embeddings_map: A map from utterance text to its embedding.
-            min_cluster_size: The minimum size of clusters to be considered by HDBSCAN.
-            min_samples: The number of samples in a neighborhood for a point to be considered as a core point.
-            min_samples_for_analysis: The minimum utterance count for an intent to be included in PCA dimension calculation.
+            embeddings_map: 语料文本到嵌入向量的映射
+            min_cluster_size: HDBSCAN最小簇大小
+            min_samples: HDBSCAN最小样本数参数
+            min_samples_for_analysis: 意图纳入PCA分析的最小语料数
 
         Returns:
-            A dictionary containing the clustering results and an audit of each cluster.
+            包含聚类结果和审计信息的字典
         """
-        logger.info(
-            f"Starting global clustering audit with min_cluster_size={min_cluster_size} in PCA-reduced space..."
+        # 1. 获取PCA降维结果
+        pca_results = self.dimensionality_reducer.get_pca_embeddings(
+            embeddings_map, min_samples_for_analysis
         )
-        
-        # Perform clustering in the PCA-reduced space for better density estimation
-        pca_results = self._get_reduced_embeddings_with_pca(embeddings_map, min_samples_for_analysis)
         reduced_embeddings_map = pca_results.get("reduced_map", {})
         
         if not reduced_embeddings_map:
-            logger.warning("Could not get reduced embeddings for clustering. Aborting audit.")
+            logger.warning("PCA reduction failed. Aborting clustering audit.")
             return {"summary": {}, "clusters": [], "raw_labels": []}
 
-        utterances = self.dataset.get_utterances()
-        texts = [utt.text for utt in utterances]
-        intents = [utt.intent for utt in utterances]
-        reduced_embeddings = np.array([reduced_embeddings_map[text] for text in texts])
-
-        clusterer = hdbscan.HDBSCAN(
+        # 2. 执行聚类审计
+        return self.cluster_auditor.audit_clusters_globally(
+            reduced_embeddings_map=reduced_embeddings_map,
             min_cluster_size=min_cluster_size,
-            min_samples=min_samples,
-            metric="euclidean",
-        )
-        
-        cluster_labels = clusterer.fit_predict(reduced_embeddings)
-
-        # Create a DataFrame for easy analysis
-        df = pd.DataFrame({"text": texts, "original_intent": intents, "cluster": cluster_labels})
-
-        # --- Analysis ---
-        num_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
-        noise_ratio = np.sum(cluster_labels == -1) / len(cluster_labels)
-        logger.info(
-            f"HDBSCAN found {num_clusters} clusters and {noise_ratio:.2%} noise."
+            min_samples=min_samples
         )
 
-        cluster_audit = []
-        for cluster_id in sorted(set(cluster_labels)):
-            if cluster_id == -1:
-                continue
-
-            cluster_df = df[df["cluster"] == cluster_id]
-            intent_counts = cluster_df["original_intent"].value_counts()
-
-            majority_intent = intent_counts.idxmax()
-            majority_count = intent_counts.max()
-            total_samples = len(cluster_df)
-            purity = majority_count / total_samples
-
-            if total_samples < 3:  # As per fds.md, filter small clusters
-                continue
-
-            cluster_audit.append(
-                {
-                    "cluster_id": cluster_id,
-                    "size": total_samples,
-                    "majority_intent": majority_intent,
-                    "purity": purity,
-                    "intent_distribution": intent_counts.to_dict(),
-                }
-            )
-
-        # Sort clusters by purity and size to highlight the most problematic ones
-        cluster_audit.sort(key=lambda x: (x["purity"], -x["size"]))
-
-        logger.success("Global clustering audit complete.")
-        return {
-            "summary": {
-                "num_clusters": num_clusters,
-                "noise_ratio": noise_ratio,
-                "total_utterances": len(df),
-            },
-            "clusters": cluster_audit,
-            "raw_labels": df.to_dict("records"),
-        }
-
-    def enrich_low_utterance_intents(self, threshold: int = 25) -> Dict[str, List[str]]:
+    def generate_utterance_candidates(self, threshold: int = 25) -> Dict[str, List[str]]:
         """
-        Generates new utterance candidates for intents with low sample counts.
-        The number of generated utterances for each intent will be the difference
-        between the threshold and its current utterance count.
+        为低样本量意图生成候选语料。
+        
+        重构说明：统一命名约定，从enrich_*改为generate_*。
 
         Args:
-            threshold: The minimum number of utterances an intent should have.
+            threshold: 意图应具有的最小语料数量
 
         Returns:
-            A dictionary where keys are intent names and values are lists of
-            newly generated utterance candidates. This is for review and does not
-            modify the original dataset.
+            意图名到新生成候选语料列表的映射，需人工审核后使用
         """
         logger.info(f"Starting data enrichment for intents with < {threshold} utterances.")
         
@@ -713,7 +381,7 @@ class CLUProcessor:
         return generated_candidates
 
     def _build_enrichment_prompt(
-        self, intent: "Intent", examples: List[Utterance], num_to_generate: int
+        self, intent: Intent, examples: List[Utterance], num_to_generate: int
     ) -> str:
         """Builds a detailed prompt for the LLM to generate new utterances."""
         

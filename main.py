@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Main entry point for the CLU data cleaning CLI."""
+"""重构后的CLU数据清洗CLI入口，消除参数重复定义。"""
 
 from pathlib import Path
 from datetime import datetime
@@ -14,6 +14,47 @@ from src.utils.logging import setup_logging
 from src.visualization import Visualizer
 
 
+# 通用参数装饰器，消除CLI参数重复定义
+def common_input_file_option(f):
+    """通用输入文件参数装饰器。"""
+    return click.option(
+        "--input-file", "-i",
+        type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+        required=True,
+        help="CLU JSON文件路径"
+    )(f)
+
+
+def common_output_dir_option(f):
+    """通用输出目录参数装饰器。"""
+    return click.option(
+        "--output-dir", "-o",
+        type=click.Path(file_okay=False, resolve_path=True),
+        default="outputs",
+        help="输出目录"
+    )(f)
+
+
+def common_min_samples_option(f):
+    """通用最小样本数参数装饰器。"""
+    return click.option(
+        "--min-samples",
+        type=int,
+        default=15,
+        help="意图纳入边界违规和聚类分析的最小样本数"
+    )(f)
+
+
+def common_sort_by_option(f):
+    """通用排序参数装饰器。"""
+    return click.option(
+        "--sort-by",
+        type=click.Choice(['p_value', 'intent'], case_sensitive=False),
+        default='p_value',
+        help="边界违规报告排序方式 ('p_value' 或 'intent')"
+    )(f)
+
+
 @click.group()
 def cli():
     """A CLI tool for analyzing and cleaning Azure CLU datasets."""
@@ -21,36 +62,15 @@ def cli():
 
 
 @cli.command()
-@click.option(
-    "--input-file",
-    "-i",
-    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
-    required=True,
-    help="Path to the input CLU JSON file.",
-)
-@click.option(
-    "--output-dir",
-    type=click.Path(file_okay=False, resolve_path=True),
-    default="outputs",
-    help="Directory to save all outputs.",
-)
-@click.option(
-    "--min-samples",
-    type=int,
-    default=15,
-    help="Minimum samples for an intent to be included in boundary violation and cluster analysis.",
-)
-@click.option(
-    "--sort-by",
-    type=click.Choice(['p_value', 'intent'], case_sensitive=False),
-    default='p_value',
-    help="Sort key for the boundary violation report ('p_value' or 'intent').",
-)
+@common_input_file_option
+@common_output_dir_option
+@common_min_samples_option
+@common_sort_by_option
 @click.option(
     "--outlier-threshold",
     type=click.Choice(['90pct', '95pct', 'iqr'], case_sensitive=False),
     default='95pct',
-    help="Threshold policy for outlier detection ('90pct', '95pct', or 'iqr').",
+    help="异常点检测阈值策略 ('90pct', '95pct', 或 'iqr')",
 )
 def run_all(input_file: str, output_dir: str, min_samples: int, sort_by: str, outlier_threshold: str):
     """
@@ -92,9 +112,9 @@ def run_all(input_file: str, output_dir: str, min_samples: int, sort_by: str, ou
     processor = CLUProcessor(dataset, output_dir=output_path)
     embeddings_map = processor.get_all_embeddings()
 
-    outliers = processor.detect_intra_intent_outliers(embeddings_map, threshold_policy=outlier_threshold)
-    cluster_audit = processor.audit_global_clusters(embeddings_map, min_samples_for_analysis=min_samples)
-    boundary_violations = processor.detect_boundary_violations(embeddings_map, min_samples_for_analysis=min_samples)
+    outliers = processor.find_outliers_within_intents(embeddings_map, threshold_policy=outlier_threshold)
+    cluster_audit = processor.audit_clusters_globally(embeddings_map, min_samples_for_analysis=min_samples)
+    boundary_violations = processor.analyze_boundary_violations(embeddings_map, min_samples_for_analysis=min_samples)
 
     # 3. Visualization Layer
     visualizer = Visualizer(dataset, output_dir=figure_path)
@@ -117,30 +137,19 @@ def run_all(input_file: str, output_dir: str, min_samples: int, sort_by: str, ou
 
 
 @cli.command()
-@click.option(
-    "--input-file",
-    "-i",
-    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
-    required=True,
-    help="Path to the input CLU JSON file.",
-)
-@click.option(
-    "--output-dir",
-    type=click.Path(file_okay=False, resolve_path=True),
-    default="outputs",
-    help="Directory to save outputs.",
-)
+@common_input_file_option
+@common_output_dir_option
 @click.option(
     "--threshold",
     type=int,
     default=25,
-    help="Utterance count threshold below which to enrich intents.",
+    help="意图需要增广的语料数量阈值",
 )
 @click.option(
     "--dry-run",
     is_flag=True,
     default=False,
-    help="仅在控制台打印生成的候选语料，不保存报告文件。",
+    help="仅在控制台打印生成的候选语料，不保存报告文件",
 )
 def enrich(input_file: str, output_dir: str, threshold: int, dry_run: bool):
     """
@@ -158,7 +167,7 @@ def enrich(input_file: str, output_dir: str, threshold: int, dry_run: bool):
         return
         
     processor = CLUProcessor(dataset, output_dir=output_path)
-    generated_candidates = processor.enrich_low_utterance_intents(threshold=threshold)
+    generated_candidates = processor.generate_utterance_candidates(threshold=threshold)
     
     if not generated_candidates:
         logger.info("未生成任何候选语料。")
@@ -186,37 +195,16 @@ def enrich(input_file: str, output_dir: str, threshold: int, dry_run: bool):
 
 
 @cli.command()
-@click.option(
-    "--input-file",
-    "-i",
-    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
-    required=True,
-    help="Path to the CLU project JSON file.",
-)
+@common_input_file_option
 @click.option(
     '--target-intents', '-t',
     multiple=True,
     required=True,
-    help="Specify an intent for targeted analysis. Use this option multiple times (at least 2 required).",
+    help="指定要分析的意图，使用多次此选项（至少需要2个意图）",
 )
-@click.option(
-    "--output-dir",
-    type=click.Path(file_okay=False, resolve_path=True),
-    default="outputs",
-    help="Root directory to save analysis results. A specific subfolder will be created inside for this run.",
-)
-@click.option(
-    "--min-samples",
-    type=int,
-    default=15,
-    help="Minimum utterances for an intent to be used for building a statistical distribution.",
-)
-@click.option(
-    "--sort-by",
-    type=click.Choice(['p_value', 'intent'], case_sensitive=False),
-    default='p_value',
-    help="Sort key for the boundary violation report.",
-)
+@common_output_dir_option
+@common_min_samples_option
+@common_sort_by_option
 def compare_intents(
     input_file: str,
     target_intents: tuple[str, ...],
@@ -261,7 +249,7 @@ def compare_intents(
     embeddings_map = processor.get_all_embeddings()
     
     logger.info("Step 2/3: Running targeted boundary violation analysis...")
-    violations = processor.detect_targeted_boundary_violations(
+    violations = processor.analyze_targeted_boundary_violations(
         embeddings_map=embeddings_map,
         target_intents=list(target_intents),
         min_samples_for_analysis=min_samples,

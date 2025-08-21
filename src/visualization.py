@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Functions for creating and saving visualizations."""
+"""重构后的可视化模块，消除UMAP重复计算，统一绘图配置。"""
 
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -10,32 +10,47 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from sklearn.metrics.pairwise import cosine_similarity
-import umap
 
+from src.core.dimensionality_reducer import DimensionalityReducer
 from src.dataset import CLUDataset
 from src.schemas import BoundaryViolationRecord
 
 
 class Visualizer:
-    """Handles the creation of various plots for dataset analysis."""
+    """
+    重构后的可视化器，消除UMAP重复计算。
+    
+    统一使用DimensionalityReducer进行降维，避免重复计算。
+    """
 
     def __init__(self, dataset: CLUDataset, output_dir: Path = Path("outputs/figures")):
         """
-        Initializes the visualizer.
+        初始化可视化器和降维模块。
 
         Args:
-            dataset: The CLUDataset to visualize.
-            output_dir: Directory to save the plots.
+            dataset: CLU数据集实例
+            output_dir: 保存图片的目录
         """
         self.dataset = dataset
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 初始化降维器
+        self.dimensionality_reducer = DimensionalityReducer(dataset)
+        
+        # 配置绘图主题
+        self._setup_plotting_environment()
+        
+        logger.info(f"Visualizer initialized. Figures will be saved to '{self.output_dir.resolve()}'")
+    
+    def _setup_plotting_environment(self):
+        """统一配置绘图环境，避免重复设置。"""
         sns.set_theme(style="whitegrid")
         
-        # Configure matplotlib to use a font that supports Chinese characters
+        # 配置中文字体支持
         try:
             plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']
-            plt.rcParams['axes.unicode_minus'] = False  # Solve the problem of the minus sign displaying as a square
+            plt.rcParams['axes.unicode_minus'] = False
             logger.info("Set matplotlib font to 'WenQuanYi Micro Hei' for Chinese support.")
         except Exception:
             logger.warning(
@@ -43,8 +58,6 @@ class Visualizer:
                 "Plots may not render CJK characters correctly. "
                 "Please ensure the font is installed on the system."
             )
-
-        logger.info(f"Visualizer initialized. Figures will be saved to '{self.output_dir.resolve()}'")
 
     def plot_intent_similarity_heatmap(
         self, embeddings_map: Dict[str, np.ndarray], save: bool = True
@@ -116,38 +129,7 @@ class Visualizer:
 
         return fig
 
-    def _reduce_dimensions_umap(
-        self,
-        embeddings: np.ndarray,
-        n_neighbors: int = 15,
-        min_dist: float = 0.1,
-        random_state: int = 42,
-    ) -> np.ndarray:
-        """
-        Reduces the dimensionality of embeddings using UMAP.
 
-        Args:
-            embeddings: A numpy array of high-dimensional embeddings.
-            n_neighbors: UMAP's n_neighbors parameter.
-            min_dist: UMAP's min_dist parameter.
-            random_state: The random seed for reproducibility.
-
-        Returns:
-            A numpy array of 2D embeddings.
-        """
-        logger.info(
-            f"Performing UMAP dimensionality reduction (n_neighbors={n_neighbors}, min_dist={min_dist})..."
-        )
-        reducer = umap.UMAP(
-            n_neighbors=n_neighbors,
-            min_dist=min_dist,
-            metric="cosine",
-            random_state=random_state,
-            n_components=2,
-        )
-        embeddings_2d = reducer.fit_transform(embeddings)
-        logger.success("UMAP reduction complete.")
-        return embeddings_2d
 
     def plot_global_scatterplot(
         self,
@@ -168,11 +150,12 @@ class Visualizer:
         """
         logger.info("Generating global utterance scatter plot...")
         utterances = self.dataset.get_utterances()
-        embeddings = np.array([embeddings_map[utt.text] for utt in utterances])
         intents = [utt.intent for utt in utterances]
         texts = [utt.text for utt in utterances]
 
-        embeddings_2d = self._reduce_dimensions_umap(embeddings)
+        # 使用统一的UMAP降维器，避免重复计算
+        umap_embeddings_map = self.dimensionality_reducer.get_umap_embeddings(embeddings_map)
+        embeddings_2d = np.array([umap_embeddings_map[text] for text in texts])
 
         df = pd.DataFrame(embeddings_2d, columns=["x", "y"])
         df["intent"] = intents
@@ -278,13 +261,14 @@ class Visualizer:
         """
         logger.info(f"Generating targeted scatter plot for intents: {target_intents}...")
         
-        # --- 1. Perform UMAP on the entire dataset to get a consistent 2D projection ---
+        # --- 1. 使用统一UMAP降维器获得一致的2D投影 ---
         all_utterances = self.dataset.get_utterances()
-        all_embeddings = np.array([embeddings_map[utt.text] for utt in all_utterances])
         all_intents = [utt.intent for utt in all_utterances]
         all_texts = [utt.text for utt in all_utterances]
         
-        embeddings_2d = self._reduce_dimensions_umap(all_embeddings)
+        # 使用统一的UMAP降维器，避免重复计算
+        umap_embeddings_map = self.dimensionality_reducer.get_umap_embeddings(embeddings_map)
+        embeddings_2d = np.array([umap_embeddings_map[text] for text in all_texts])
         
         df = pd.DataFrame(embeddings_2d, columns=["x", "y"])
         df["intent"] = all_intents
@@ -384,10 +368,17 @@ class Visualizer:
                 )
                 continue
 
-            embeddings = np.array([embeddings_map[utt.text] for utt in utterances])
-            # Adjust n_neighbors to be less than the number of samples
+            # 对于单个意图的散点图，需要独立的UMAP以适应样本数
+            intent_embeddings_map = {utt.text: embeddings_map[utt.text] for utt in utterances}
             n_neighbors = min(15, len(utterances) - 1)
-            embeddings_2d = self._reduce_dimensions_umap(embeddings, n_neighbors=n_neighbors)
+            
+            # 单独计算该意图的UMAP（因为需要调整n_neighbors）
+            umap_embeddings_map = self.dimensionality_reducer.get_umap_embeddings(
+                intent_embeddings_map, 
+                n_neighbors=n_neighbors,
+                force_recompute=True  # 强制重新计算以使用不同的n_neighbors
+            )
+            embeddings_2d = np.array([umap_embeddings_map[utt.text] for utt in utterances])
 
             df = pd.DataFrame(embeddings_2d, columns=['x', 'y'])
             df['text'] = [utt.text for utt in utterances]
